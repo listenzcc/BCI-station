@@ -1,0 +1,20 @@
+Project:
+    name: BCI Station
+    version: V0.1
+    author: Chuncheng Zhang
+    programmingLanguage: Python
+    i18n: English & Chinese
+
+Dependencies:
+    - numpy
+    - pandas
+    - rich
+    - tqdm
+    - loguru
+    - omegaconfig
+    - argparse
+    - tkinter
+
+ControlCenter:
+    host: localhost
+    port: 36000
