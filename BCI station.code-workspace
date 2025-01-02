@@ -5,7 +5,10 @@
 		},
 		{
 			"path": "Control center",
-		}
+		},
+		{
+			"path": "EEG device side",
+		},
 	],
 	"settings": {}
 }
