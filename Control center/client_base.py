@@ -1,25 +1,58 @@
-import socket
 import time
+import socket
+from threading import Thread
 
 
-class ClientBase:
-    name = 'Base client'
+class SocketClientBase:
+    # Client setup, may be overridden by subclasses.
+    path = '/client/baseClient'
     uid = 'bc-0'
     key_code = b'12345678'
 
-    def __init__(self, host='localhost', port=12345, timeout=1000):
-        self.host = host
-        self.port = port
+    # Socket setup, may be overridden by subclass and __init__ method.
+    host = 'localhost'
+    port = 12345
+    timeout = 1000
+
+    def __init__(self, host=None, port=None, timeout=None):
+        if host:
+            self.host = host
+        if port:
+            self.port = port
+        if timeout:
+            self.timeout = timeout
+
         self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.client_socket.settimeout(timeout)
+        self.client_socket.settimeout(self.timeout)
+
+    def keep_alive(self):
+        def _keep_alive():
+            while True:
+                try:
+                    self.send_message(f'Keep-Alive, {time.time()}')
+                    time.sleep(5)
+                except (ConnectionAbortedError, ConnectionResetError, socket.timeout):
+                    break
+        Thread(target=_keep_alive, daemon=True).start()
+
+    def keep_receiving(self):
+        def _receive_message():
+            while True:
+                try:
+                    message = self.receive_message()
+                except (ConnectionAbortedError, ConnectionResetError, socket.timeout):
+                    break
+        Thread(target=_receive_message, daemon=True).start()
 
     def connect(self):
         self.client_socket.connect((self.host, self.port))
         print(f"Connected to server at {self.host}:{self.port}")
         self.send_initial_info()
+        self.keep_receiving()
+        self.keep_alive()
 
     def send_initial_info(self):
-        initial_message = f"{self.name},{self.uid}"
+        initial_message = f"{self.path},{self.uid}"
         self.send_message(initial_message, include_key=True)
 
     def send_message(self, message, include_key=False):
@@ -54,36 +87,47 @@ class ClientBase:
 
             message = message.decode()
             print(f"Received message: {message}")
-            self.handle_message(message)
+            self.default_handle_message(message)
             return message
         except ConnectionResetError:
             print("Connection reset")
+            raise ConnectionResetError
         except socket.timeout:
             print("Timeout occurred")
+            raise socket.timeout
 
         return None
 
-    def handle_message(self, message):
+    def close(self):
+        self.client_socket.close()
+        print("Connection closed")
+
+    def default_handle_message(self, message):
         if message.startswith("echo"):
             parts = message.split(',')
             t1 = float(parts[1])
             t2 = time.time()
             response_message = f"echo,{t1},{t2}"
             self.send_message(response_message)
+        else:
+            self.handle_message(message)
+            pass
 
-    def close(self):
-        self.client_socket.close()
-        print("Connection closed")
+    def handle_message(self, message):
+        print(f"!!! Got message: {message}")
 
 
 if __name__ == "__main__":
-    # client = ClientBase(host='192.168.137.1')
-    client = ClientBase()
+    # client = SocketClientBase(host='192.168.137.1')
+    client = SocketClientBase()
     client.connect()
-    while True:
-        response = client.receive_message()
-        if response:
-            print(f"Server response: {response}")
-        else:
-            break
+
+    input('Press enter to stop.')
+    # while True:
+    #     response = client.receive_message()
+    #     if response:
+    #         print(f"Server response: {response}")
+    #     else:
+    #         break
+
     client.close()

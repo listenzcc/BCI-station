@@ -12,10 +12,18 @@ logger.add('log/BCI station control center.log', rotation='5 MB')
 
 
 class ControlCenter:
-    def __init__(self, host='localhost', port=12345, valid_key=b'12345678'):
-        self.host = host
-        self.port = port
-        self.valid_key = valid_key
+    host = 'localhost'
+    port = 12345
+    valid_key = b'12345678'
+
+    def __init__(self, host=None, port=None, valid_key=None):
+        if host:
+            self.host = host
+        if port:
+            self.port = port
+        if valid_key:
+            self.valid_key = valid_key
+
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.clients = {}
         self.gui = None
@@ -85,7 +93,8 @@ class ControlCenter:
                 'name': client_name,
                 'uid': client_uid,
                 'frame': None,
-                'latest_message': tk.StringVar()
+                'latest_message': tk.StringVar(),
+                'messages': tk.IntVar()
             }
 
             self.update_latest_message(
@@ -124,21 +133,8 @@ class ControlCenter:
                 message = message.decode()
                 logger.debug(
                     f"Received message: {message[:20]} ({len(message)} bytes)")
-                self.update_latest_message(client_address, message)
 
-                # TODO: Handle the message from the client
-                if message.startswith("echo"):
-                    # Handle echo package
-                    # Handle the echo package AFTER the connection has been established.
-                    # It is used to sync the client during the workflow.
-                    parts = message.split(',')
-                    t1 = float(parts[1])
-                    t2 = float(parts[2])
-                    t3 = time.time()
-                    self.echo_data.append({'t1': t1, 't2': t2, 't3': t3})
-                    logger.debug('Received echo message.')
-                else:
-                    logger.warning(f'Can not handle message: {message}')
+                self.handle_message(message, client_address)
 
                 # The next while loop.
                 continue
@@ -152,18 +148,50 @@ class ControlCenter:
             self.update_latest_message(
                 client_address, f"{client_name} ({client_uid}) disconnected")
 
+    def handle_message(self, message, client_address):
+        meaningful_message = False
+
+        # TODO: Handle the message from the client
+        if message.startswith("echo"):
+            # Handle echo package
+            # Handle the echo package AFTER the connection has been established.
+            # It is used to sync the client during the workflow.
+            parts = message.split(',')
+            t1 = float(parts[1])
+            t2 = float(parts[2])
+            t3 = time.time()
+            self.echo_data.append({'t1': t1, 't2': t2, 't3': t3})
+            logger.debug('Received echo message.')
+        elif message.startswith("Keep-Alive"):
+            # Handle keep-alive package.
+            # Not doing anything.
+            pass
+        elif message.startswith("Info."):
+            # Handle info package.
+            # ! Not doing anything.
+            pass
+        else:
+            meaningful_message = True
+            logger.warning(f'Can not handle message: {message}')
+
+        # Update the latest message.
+        self.update_latest_message(
+            client_address, message, meaningful_message=True)
+
+        return message
+
     def send_echo_packages(self, client_socket, client_address):
         """
         Send and receive a chunk of echo packages.
 
         Attention, this methods duplicates 20 talks to prevent random delay occasionally.
-        There are 50 ms gaps between talks, so it costs about 1.0 seconds to finish.
+        There are 10 ms gaps between talks, so it costs about 0.2 seconds to finish.
         """
         echo_data = []
         for _ in tqdm(range(20), 'Echo'):
             self.send_echo_package(client_socket)
             self.receive_echo_response(client_socket, echo_data)
-            time.sleep(0.05)
+            time.sleep(0.01)
         df = pd.DataFrame(echo_data)
         df['delay'] = df['t3'] - df['t1']
         df['tServer'] = (df['t3'] + df['t1']) / 2
@@ -229,11 +257,15 @@ class ControlCenter:
         client_socket.sendall(message_length + message_bytes)
         logger.debug(f"Sent message: {message[:20]} ({len(message)} bytes)")
 
-    def update_latest_message(self, client_address, message: str):
+    def update_latest_message(self, client_address, message: str, meaningful_message: bool = True):
         """Update the latest message of the client."""
         client_info = self.clients.get(client_address)
         if client_info:
-            client_info['latest_message'].set(message)
+            # Only update the latest message when it is the meaningful message.
+            if meaningful_message:
+                client_info['latest_message'].set(message)
+            # Ascending the messages count.
+            client_info['messages'].set(client_info['messages'].get()+1)
 
     def update_client_list_tkUI(self):
         """Update the client list in the Tkinter GUI."""
@@ -254,10 +286,12 @@ class ControlCenter:
             # Latest message.
             tk.Label(frame,
                      textvariable=client_info['latest_message']).pack()
+            # Messages.
+            tk.Label(frame,
+                     textvariable=client_info['messages']).pack()
             frame.pack()
             client_info['frame'] = frame
-
-        logger.debug(f'Updated UI for client {client_address}')
+            logger.debug(f'Updated UI for client {client_address}')
 
     def start_gui(self):
         """Start the Tkinter GUI."""

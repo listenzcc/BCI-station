@@ -9,6 +9,9 @@
 		{
 			"path": "EEG device side",
 		},
+		{
+			"path": "HID side",
+		},
 	],
 	"settings": {}
 }
