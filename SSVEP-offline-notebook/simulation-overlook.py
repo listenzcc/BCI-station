@@ -18,13 +18,6 @@ Functions:
 
 # %% ---- 2025-01-09 ------------------------
 # Requirements and constants
-import seaborn as sns
-import streamlit as st
-from scipy.stats import multivariate_normal
-import matplotlib.pyplot as plt
-import numpy as np
-import os
-import subprocess
 
 required_packages = ['matplotlib', 'seaborn', 'scipy']
 
@@ -33,6 +26,15 @@ for package in required_packages:
         __import__(package)
     except ImportError:
         subprocess.check_call(["python", '-m', 'pip', 'install', package])
+
+
+import seaborn as sns
+import streamlit as st
+from scipy.stats import multivariate_normal
+import matplotlib.pyplot as plt
+import numpy as np
+import os
+import subprocess
 
 
 # Set seaborn style
