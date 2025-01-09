@@ -12,6 +12,9 @@
 		{
 			"path": "HID side",
 		},
+		{
+			"path": "SSVEP offline notebook",
+		},
 	],
 	"settings": {}
 }

@@ -1,0 +1,4 @@
+*.npy
+*.npz
+*.ipynb
+spatialFilters.py
