@@ -18,6 +18,7 @@ Functions:
 
 # %% ---- 2025-01-09 ------------------------
 # Requirements and constants
+import subprocess
 
 required_packages = ['matplotlib', 'seaborn', 'scipy']
 
@@ -34,7 +35,6 @@ from scipy.stats import multivariate_normal
 import matplotlib.pyplot as plt
 import numpy as np
 import os
-import subprocess
 
 
 # Set seaborn style
