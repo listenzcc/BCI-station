@@ -22,13 +22,15 @@ import tkinter
 from tkinter import ttk
 
 import sys
+import json
+import time
 import keyboard
 import argparse
 
 from loguru import logger
 from rich import print, inspect
 
-from .sync.control_center.client_base import SocketClientBase
+from sync.control_center.client_base import SocketClientBase
 
 logger.add('log/keyboard hiker.log', rotation='5 MB')
 
@@ -47,6 +49,7 @@ class SocketClient(SocketClientBase):
 
 # Socket client
 client = SocketClient(host='localhost')
+client.connect()
 
 
 class GUI(tkinter.Tk):
@@ -117,7 +120,10 @@ class KeyboardHiker(object):
                     escape_key_name, lambda x: self.gui.destroy(), suppress=self.suppress)
 
             # Make the content of the list box
-            lst = [f'{e[0]}: {e[1]}' for e in self.arguments._get_kwargs()]
+            if self.arguments:
+                lst = [f'{e[0]}: {e[1]}' for e in self.arguments._get_kwargs()]
+            else:
+                lst = []
             if self.suppress and self.escape_key_name is not None:
                 lst.append(
                     'Warning: escape key will be ignored since it is suppressed.')
@@ -140,16 +146,30 @@ class KeyboardHiker(object):
         logger.debug(f'Bound with onPress event, suppress={self.suppress}')
 
     def callback(self, event):
+        '''The callback function for receiving the key press event'''
+
+        # Count the event.
         self.count += 1
 
+        # Verbose.
         if self.verbose:
             inspect(event)
 
+        # Update the gui, if it is enabled.
         if self.gui:
             self.gui.label.config(
                 text=f'{event}\n{event.time}\nCount: {self.count}')
 
+        # Logging.
         logger.debug(f'Got key press: {event}, {event.time}')
+
+        # Send ssvep_chunk_start event to the /eeg/monitor
+        message = dict(
+            dst='/eeg/monitor',
+            content=f'ssvep_chunk_start, 13.3',
+            time=time.time()
+        )
+        client.send_message(json.dumps(message))
 
 
 # %% ---- 2024-11-15 ------------------------

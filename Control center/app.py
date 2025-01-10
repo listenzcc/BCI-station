@@ -1,4 +1,5 @@
 import time
+import json
 import socket
 import threading
 import pandas as pd
@@ -81,7 +82,7 @@ class ControlCenter:
             logger.debug(
                 f"Received message: {message[:20]} ({len(message)} bytes)")
             client_info = message.split(',')
-            client_name = client_info[0]
+            client_path = client_info[0]
             client_uid = client_info[1]
 
             # New client is coming.
@@ -90,7 +91,7 @@ class ControlCenter:
             self.clients[client_address] = {
                 'address': client_address,
                 'socket': client_socket,
-                'name': client_name,
+                'path': client_path,
                 'uid': client_uid,
                 'frame': None,
                 'latest_message': tk.StringVar(),
@@ -98,7 +99,7 @@ class ControlCenter:
             }
 
             self.update_latest_message(
-                client_address, f"{client_name} ({client_uid}) connected")
+                client_address, f"{client_path} ({client_uid}) connected")
 
             # Echo package chunk.
             self.send_echo_packages(client_socket, client_address)
@@ -146,10 +147,12 @@ class ControlCenter:
             del self.clients[client_address]
             self.update_client_list_tkUI()
             self.update_latest_message(
-                client_address, f"{client_name} ({client_uid}) disconnected")
+                client_address, f"{client_path} ({client_uid}) disconnected")
 
     def handle_message(self, message, client_address):
         meaningful_message = False
+
+        src_client = self.clients[client_address]
 
         # TODO: Handle the message from the client
         if message.startswith("echo"):
@@ -170,6 +173,27 @@ class ControlCenter:
             # Handle info package.
             # ! Not doing anything.
             pass
+        elif message.startswith("{"):
+            # The incoming message is the json object
+            dct = json.loads(message)
+            count = 0
+            # Transfer it to the client with dst path
+            for addr, dst_client in self.clients.items():
+                if dst_client['path'] == dct.get('dst'):
+                    msg = dct['content']
+                    t = dct['time']
+                    # Translate src time into local time
+                    t = t - src_client['netRemoteTime'] + \
+                        src_client['netLocalTime']
+                    # Translate local time into dst time
+                    t = t - dst_client['netLocalTime'] + \
+                        dst_client['netRemoteTime']
+                    msg = msg + f', {t}'
+                    self.send_message(dst_client['socket'], msg)
+                    logger.info(f'Sent {msg} to {addr}')
+                    count += 1
+            if count == 0:
+                logger.warning(f'Received {dct}, but did not deliver.')
         else:
             meaningful_message = True
             logger.warning(f'Can not handle message: {message}')
@@ -279,7 +303,7 @@ class ControlCenter:
             frame = tk.Frame(self.client_list_frame)
             # Basic information.
             tk.Label(frame,
-                     text=f"{client_info['name']} ({client_info['uid']}) {client_address}").pack()
+                     text=f"{client_info['path']} ({client_info['uid']}) {client_address}").pack()
             # Network information.
             tk.Label(frame,
                      text=f"Delay: {client_info['netDelay']:.4f} | Offset: {client_info['netRemoteTime'] - client_info['netLocalTime']:.4f}").pack()

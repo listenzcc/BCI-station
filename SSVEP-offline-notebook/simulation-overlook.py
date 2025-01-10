@@ -105,7 +105,6 @@ def generate_eeg_response(time_series, times, fs_eeg):
 
 
 if __name__ == '__main__':
-    # Check if the script is being run directly
     fs_eeg = 250  # Hz
     fs_sti = 100  # Hz
 
