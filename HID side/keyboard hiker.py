@@ -27,28 +27,40 @@ import time
 import keyboard
 import argparse
 
+from threading import Thread
 from loguru import logger
 from rich import print, inspect
 
-from sync.control_center.client_base import SocketClientBase
+from sync.routine_center.client_base import BaseClientSocket, MailMan
 
 logger.add('log/keyboard hiker.log', rotation='5 MB')
 
 # %% ---- 2024-11-15 ------------------------
 # Function and class
 
+mm = MailMan('keyboard-hiker-1')
 
-class SocketClient(SocketClientBase):
+class MyClient(BaseClientSocket):
     path = '/client/keyboardHiker'
     uid = 'keyboard-hiker-1'
 
     def __init__(self, host=None, port=None, timeout=None):
         super().__init__(**dict(host=host, port=port, timeout=timeout))
+        logger.info(f'Initializing client: {self.path_uid}')
         pass
+
+    def handle_message(self, message):
+        super().handle_message(message)
+        letter = json.loads(message)
+        if mm.retrieve_letter_in_waiting(letter['uid']):
+            mm.archive_finished_letter(letter)
+            logger.info(f'Finished: {letter}')
+        else:
+            logger.warning(f'Failed: {letter}')
 
 
 # Socket client
-client = SocketClient(host='localhost')
+client = MyClient(host='localhost')
 client.connect()
 
 
@@ -164,12 +176,16 @@ class KeyboardHiker(object):
         logger.debug(f'Got key press: {event}, {event.time}')
 
         # Send ssvep_chunk_start event to the /eeg/monitor
-        message = dict(
-            dst='/eeg/monitor',
-            content=f'ssvep_chunk_start, 13.3',
-            time=time.time()
-        )
-        client.send_message(json.dumps(message))
+        letter = mm.mk_letter(src=client.path_uid, dst='/client/simulationWorkload', content=f'Event: {event}')
+        client.send_message(json.dumps(letter))
+        mm.archive_await_letter(letter)
+        Thread(target=mark_as_expired, args=(letter['uid'],), daemon=True).start()
+
+def mark_as_expired(uid):
+    time.sleep(3)
+    letter = mm.mark_expired_letter_with_uid(uid)
+    if letter:
+        logger.error(f'Expired: {letter}')
 
 
 # %% ---- 2024-11-15 ------------------------

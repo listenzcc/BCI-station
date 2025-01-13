@@ -7,7 +7,7 @@ import tkinter as tk
 
 from loguru import logger
 from tqdm.auto import tqdm
-from tkinter import messagebox
+from urllib.parse import urlparse
 
 logger.add('log/BCI station control center.log', rotation='5 MB')
 
@@ -50,7 +50,6 @@ class ControlCenter:
         """Handle communication with a connected client."""
         try:
             # Receive the hello message from the client.
-
             # Read the advanced key code (8 bytes) for identifying the legal client.
             key_code = client_socket.recv(8)
             if key_code != self.valid_key:
@@ -89,17 +88,24 @@ class ControlCenter:
             # Add into the client_list,
             # Update its status.
             self.clients[client_address] = {
+                # Basic information of the socket.
                 'address': client_address,
                 'socket': client_socket,
                 'path': client_path,
                 'uid': client_uid,
+                # The UI components for the socket.
                 'frame': None,
                 'latest_message': tk.StringVar(),
-                'messages': tk.IntVar()
+                'messages': tk.IntVar(),
+                # The connection quality of the socket.
+                # The netRemoteTime and netLocalTime is used to convert between the remote time and the local time.
+                # Estimated delay of transaction.
+                'netDelay': None,
+                # The remote timestamp.
+                'netRemoteTime': None,
+                # The local timestamp.
+                'netLocalTime': None
             }
-
-            self.update_latest_message(
-                client_address, f"{client_path} ({client_uid}) connected")
 
             # Echo package chunk.
             self.send_echo_packages(client_socket, client_address)
@@ -140,8 +146,9 @@ class ControlCenter:
                 # The next while loop.
                 continue
 
-        except (ConnectionResetError, ConnectionAbortedError, AssertionError):
-            pass
+        except (ConnectionResetError, ConnectionAbortedError, AssertionError) as err:
+            logger.error(f'Occurred: {err}')
+
         finally:
             client_socket.close()
             del self.clients[client_address]
@@ -155,7 +162,7 @@ class ControlCenter:
         src_client = self.clients[client_address]
 
         # TODO: Handle the message from the client
-        if message.startswith("echo"):
+        if message.startswith("Echo"):
             # Handle echo package
             # Handle the echo package AFTER the connection has been established.
             # It is used to sync the client during the workflow.
@@ -169,31 +176,39 @@ class ControlCenter:
             # Handle keep-alive package.
             # Not doing anything.
             pass
-        elif message.startswith("Info."):
-            # Handle info package.
-            # ! Not doing anything.
-            pass
         elif message.startswith("{"):
             # The incoming message is the json object
-            dct = json.loads(message)
-            count = 0
+            raw_letter = json.loads(message)
+
+            url = urlparse(raw_letter['dst'])
+            path = url.path
+            uid = url.query
+
+            raw_letter['_stations'].append(('ControlCenter', time.time()))
+
             # Transfer it to the client with dst path
+            count = 0
             for addr, dst_client in self.clients.items():
-                if dst_client['path'] == dct.get('dst'):
-                    msg = dct['content']
-                    t = dct['time']
+                # Check if the dst_client matches with the letter's dst.
+                if dst_client['path'] == path and any((dst_client['uid'] == uid, len(uid) == 0)):
+                    # Make the new letter.
+                    letter = raw_letter.copy()
+                    # Translate the timestamp into dst's timestamp.
+                    t = letter['_timestamp']
                     # Translate src time into local time
                     t = t - src_client['netRemoteTime'] + \
                         src_client['netLocalTime']
                     # Translate local time into dst time
                     t = t - dst_client['netLocalTime'] + \
                         dst_client['netRemoteTime']
-                    msg = msg + f', {t}'
-                    self.send_message(dst_client['socket'], msg)
-                    logger.info(f'Sent {msg} to {addr}')
+                    letter['_timestamp'] = t
+                    self.send_message(dst_client['socket'], json.dumps(letter))
+                    logger.info(f'Translated {letter} to {addr}')
                     count += 1
+
+            # If the letter is not delivered, log the warning.
             if count == 0:
-                logger.warning(f'Received {dct}, but did not deliver.')
+                logger.warning(f'Received {raw_letter}, but did not deliver.')
         else:
             meaningful_message = True
             logger.warning(f'Can not handle message: {message}')
@@ -231,9 +246,17 @@ class ControlCenter:
         return df
 
     def send_echo_package(self, client_socket):
-        """Send a single echo package to the client."""
+        """
+        Send a single echo package to the client.
+        The package is finished in 3 steps:
+            1. t1, the local sending time.
+            2. t2, the remote time.
+            3. t3, the local receiving time.
+        The t3 - t1 is the package delay.
+        And the (t1+t3)/2 in remote time zone should be of the same time with the t2 in local time zone.
+        """
         t1 = time.time()
-        message = f"echo,{t1}"
+        message = f"Echo,{t1}"
         self.send_message(client_socket, message)
 
     def receive_echo_response(self, client_socket, echo_data: list):
@@ -263,7 +286,7 @@ class ControlCenter:
             logger.debug(
                 f"Received message: {message[:20]} ({len(message)} bytes)")
 
-            if message.startswith("echo"):
+            if message.startswith("Echo"):
                 parts = message.split(',')
                 t1 = float(parts[1])
                 t2 = float(parts[2])
@@ -321,7 +344,7 @@ class ControlCenter:
         """Start the Tkinter GUI."""
         self.gui = tk.Tk()
         self.gui.title("Control Center")
-        self.gui.geometry("400x300")
+        self.gui.geometry("600x400")
         tk.Label(self.gui, text="Control Center Monitoring").pack()
         self.client_list_frame = tk.Frame(self.gui)
         self.client_list_frame.pack()
