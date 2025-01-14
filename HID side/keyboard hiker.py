@@ -40,6 +40,7 @@ logger.add('log/keyboard hiker.log', rotation='5 MB')
 
 mm = MailMan('keyboard-hiker-1')
 
+
 class MyClient(BaseClientSocket):
     path = '/client/keyboardHiker'
     uid = 'keyboard-hiker-1'
@@ -176,13 +177,20 @@ class KeyboardHiker(object):
         logger.debug(f'Got key press: {event}, {event.time}')
 
         # Send ssvep_chunk_start event to the /eeg/monitor
-        letter = mm.mk_letter(src=client.path_uid, dst='/client/simulationWorkload', content=f'Event: {event}')
+        content = f'Event: {event}'
+        dst = '/client/simulationWorkload'
+        content = 'SSVEP-chunk-start,3.14'
+        dst = '/eeg/monitor'
+        letter = mm.mk_letter(
+            src=client.path_uid, dst=dst, content=content)
         client.send_message(json.dumps(letter))
         mm.archive_await_letter(letter)
-        Thread(target=mark_as_expired, args=(letter['uid'],), daemon=True).start()
+        Thread(target=mark_as_expired, args=(
+            letter['uid'],), daemon=True).start()
+
 
 def mark_as_expired(uid):
-    time.sleep(3)
+    time.sleep(5)
     letter = mm.mark_expired_letter_with_uid(uid)
     if letter:
         logger.error(f'Expired: {letter}')

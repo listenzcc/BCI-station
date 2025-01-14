@@ -113,17 +113,33 @@ def add_noise(array):
 
 
 def mk_eeg_response(freq):
-    fs_sti = 100
-    fs_eeg = CONF['eeg']['sample_rate']
-    length = 5
-    channels = CONF['eeg']['channels']
+    '''
+    Make the eeg response for the given $freq.
 
+    Args:
+        - freq (float): The stimuli frequency.
+
+    Returns:
+        - sliced_data: The eeg response, shape is (n_time_points, n_channels).
+    '''
+    # The display fps.
+    fs_sti = 100
+    # Generate $length seconds data in total.
+    length = 5
+    # Crop the time to (0, 4) seconds.
+    max_time = 4
+    # How many channels of the EEG device.
+    channels = CONF['eeg']['channels']
+    # The EEG recording frequency.
+    fs_eeg = CONF['eeg']['sample_rate']
+
+    # Generate the display time series.
     time_series, times = generate_simulation(freq, length, fs_sti)
+    # Generate the EEG data, the length is as the same as the $time_series.
     eeg_response, eeg_times, trf_kernel, trf_kernel_times = generate_eeg_response(
         time_series, times, fs_eeg)
 
-    # Crop the time to (0, 4) seconds
-    max_time = 4
+    # Crop into $max_time seconds.
     valid_indices = times <= max_time
     time_series = time_series[valid_indices]
     times = times[valid_indices]
@@ -176,6 +192,22 @@ def convert_data_into_array(input_data: list, package_interval: float, time_reso
         - data: The data being converted, the shape is (n_channels, n_data_slices).
         - times: The times for the data slices.
     '''
+
+    # How many data packages.
+    n = len(input_data)
+    # Compute the $corrected_last_time, it is assumed to be the time of the data's last time point.
+    # ! I need the $ts is always larger than $y1, so the nearest point refers the least delayed data point being transferred.
+    y1 = np.array(range(n)) * package_interval
+    ts = np.array([e[1] for e in input_data])
+    d = np.min(ts-y1)
+    corrected_last_time = (y1 + d)[-1]
+
+    # Concatenate the data and assign the time points.
+    data = np.array(np.concat([e[2].T for e in input_data], axis=0))
+    m = len(data)
+    times = np.array([corrected_last_time-j*time_resolution for j in range(m)])
+
+    return data, times
 
     def _mix_time_with_nan(t, n):
         '''
@@ -279,9 +311,12 @@ class EEGDeviceReader(object):
 
         LOGGER.debug('Read data loop starts.')
         while self.running:
+            # Record the loop start time.
             t = time.time()
-            incoming = np.zeros((self.channels, self.package_length)) + t
 
+            # Simulation the incoming signal.
+            # The shape is (n_channels, n_time_points).
+            incoming = np.zeros((self.channels, self.package_length)) + t
             for j in range(self.package_length):
                 incoming[:, j] += j / self.sample_rate
                 incoming[:, j] %= 1
@@ -293,15 +328,23 @@ class EEGDeviceReader(object):
                     if len(self.ssvep_chunk_data) > 0:
                         incoming[:, j] = self.ssvep_chunk_data.pop()
 
+            # Push the processed incoming data.
+            # ! The format of the data_buffer's element is (i, t, d)
+            # ! The shape of d is (n_channels, n_time_points).
             self.data_buffer.append((self._read_data_idx, t, incoming))
             self._read_data_idx += 1
 
+            # Prevent the buffer size from being too large.
             if self.get_data_buffer_size() > self.packages_limit:
                 LOGGER.warning(
                     'Data buffer exceeds {} packages.'.format(self.packages_limit))
                 self.data_buffer.pop(0)
 
-            time.sleep(self.package_interval)
+            # How long is passed since the loop starts.
+            delay = time.time() - t
+
+            # Make sure the next loop starts after $self.package_interval seconds.
+            time.sleep(max(0.001, self.package_interval - delay))
 
         LOGGER.debug('Read data loop stops.')
 
@@ -328,7 +371,7 @@ class EEGDeviceReader(object):
         return len(self.data_buffer)
 
     def peek_latest_data_by_length(self, length=50):
-        """Peek the latest data in the self.data_buffer with given length.
+        """Peek the latest data in the self.data_buffer with given length in packages.
 
         If there is no data available, return None.
 
@@ -345,6 +388,12 @@ class EEGDeviceReader(object):
         output = [e for e in self.data_buffer[-length:]]
 
         return output
+
+    def peek_latest_data_by_seconds(self, seconds: float):
+        """Peek the latest data in the $self.data_buffer with given length in seconds."""
+        # Compute how many packages are required, and peek one more package for safety.
+        length = int(seconds / self.package_interval) + 1
+        return self.peek_latest_data_by_length(length)
 
     def run_forever(self):
         """Run the loops forever.

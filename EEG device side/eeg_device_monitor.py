@@ -1,5 +1,6 @@
 import cv2
 import time
+import json
 import pickle
 import pyaudio
 import numpy as np
@@ -8,7 +9,7 @@ from threading import Thread
 from matplotlib import pyplot as plt
 from matplotlib.animation import FuncAnimation
 
-from sync.control_center.client_base import SocketClientBase
+from sync.routine_center.client_base import BaseClientSocket, MailMan
 from eeg_device_reader_ssvep_simulation import EEGDeviceReader, convert_data_into_array
 
 # Init the plt with bmh
@@ -38,44 +39,60 @@ class Decoder(object):
 
 
 decoder = Decoder()
+mm = MailMan('eeg-device-monitor-1')
 
 
-class SocketClient(SocketClientBase):
+class SocketClient(BaseClientSocket):
     path = '/eeg/monitor'
     uid = 'eeg-device-monitor-1'
+    use_ssvep_simulation_reader = True
 
     def __init__(self, host=None, port=None, timeout=None):
         super().__init__(**dict(host=host, port=port, timeout=timeout))
 
     def handle_message(self, message):
         super().handle_message(message)
-        if message.startswith('ssvep_chunk_start,'):
-            display_freq = float(message.split(',')[1])
-            onstart_time = float(message.split(',')[2])
+        # Recover the letter.
+        letter = json.loads(message)
 
-            # Insert the chunk for SSVEP simulation
-            eeg_device_reader.fill_ssvep_chunk_data(display_freq)
+        # Mark the letter as received by this.
+        mm.recv_letter(letter, self.path_uid)
+
+        # Deal with content
+        content = letter['content']
+        if content.startswith('SSVEP-chunk-start,'):
+            display_freq = float(content.split(',')[1])
+            onstart_time = letter['_timestamp']
+
+            # If using simulation device, insert the chunk for SSVEP simulation
+            if self.use_ssvep_simulation_reader:
+                eeg_device_reader.fill_ssvep_chunk_data(display_freq)
+
+            # Wait a while for decoding
             Thread(target=self.wait_for_data, args=(
-                onstart_time, display_freq), daemon=True).start()
-            pass
+                onstart_time, display_freq, letter), daemon=True).start()
 
-    def wait_for_data(self, onstart_time, display_freq):
+        return
+
+    def wait_for_data(self, onstart_time, display_freq, letter):
+        # Decoding setup.
         data_length_required = 4  # seconds
-        # Should obtain the packages.
-        packages = 2 + int(data_length_required // eeg_device_reader.package_interval)
-
         package_interval = eeg_device_reader.package_interval
         time_resolution = eeg_device_reader.time_resolution
 
         # Get data after required length seconds.
         time.sleep(data_length_required)
         while True:
-            data = eeg_device_reader.peek_latest_data_by_length(packages)
-            t = data[-1][1]
+            data = eeg_device_reader.peek_latest_data_by_seconds(
+                data_length_required)
+
             # Break if already got enough data.
+            # If failed, sleep until the next package arrival.
+            t = data[-1][1]
             if t > onstart_time + data_length_required + package_interval:
                 break
-            time.sleep(0.1)
+            else:
+                time.sleep(package_interval)
 
         # Deal with the data
         data, times = convert_data_into_array(
@@ -85,9 +102,16 @@ class SocketClient(SocketClientBase):
         times = times[times >= onstart_time]
 
         pred_freq = decoder.predict(data)
+        pred_freq = float(pred_freq)
 
         print(pred_freq, display_freq)
 
+        # Send back the decoding result.
+        letter['dst'] = letter['src']
+        letter['src'] = self.path_uid
+        letter['content'] += f',{pred_freq}'
+
+        self.send_message(json.dumps(letter))
         return
 
 
@@ -226,7 +250,7 @@ def animate(i_frame):
     first = e[0]
     last = e[-1]
 
-    if i_frame % 100 == 0:
+    if i_frame % 199 == 0:
         client.send_message(f'Info. Display {i_frame} frame.')
         print(
             first[0], last[0], first[1], last[1],
