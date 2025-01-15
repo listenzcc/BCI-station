@@ -33,7 +33,6 @@ class Decoder(object):
         # Data shape is (n_time_points, n_channels).
         # Convert into (1, 4001) features.
         features = data[:4001, 0][np.newaxis, :]
-        print(features.shape)
         predicted_labels = self.svm.predict(features)
         return [self.freqs[e] for e in predicted_labels]
 
@@ -75,6 +74,7 @@ class SocketClient(BaseClientSocket):
         return
 
     def wait_for_data(self, onstart_time, display_freq, letter):
+        mm.insert_pending_letter(letter)
         # Decoding setup.
         data_length_required = 4  # seconds
         package_interval = eeg_device_reader.package_interval
@@ -102,7 +102,7 @@ class SocketClient(BaseClientSocket):
         times = times[times >= onstart_time]
 
         pred_freq = decoder.predict(data)
-        pred_freq = float(pred_freq)
+        pred_freq = float(pred_freq[0])
 
         print(pred_freq, display_freq)
 
@@ -112,11 +112,14 @@ class SocketClient(BaseClientSocket):
         letter['content'] += f',{pred_freq}'
 
         self.send_message(json.dumps(letter))
+
+        mm.remove_pending_letter(letter['uid'])
+        mm.archive_finished_letter(letter)
         return
 
 
-# client = SocketClient('192.168.137.1')
-client = SocketClient()
+client = SocketClient('192.168.137.1')
+# client = SocketClient()
 client.connect()
 
 
@@ -190,39 +193,6 @@ class CameraStream:
             self.cap.release()
 
 
-# Initialize audio and camera streams
-audio_stream = AudioStream()
-camera_stream = CameraStream()
-
-# set up plotting
-fig, axs = plt.subplots(2, 2,
-                        gridspec_kw={
-                            'height_ratios': [2, 1],
-                            'width_ratios': [2, 1]},
-                        figsize=(10, 10))
-(ax1, ax2), (ax3, ax4) = axs
-ax2.set_xlim(0, audio_stream.SAMPLESIZE-1)
-ax2.set_ylim(-9999, 9999)
-line, = ax2.plot([], [], lw=1)
-
-# Assign titles to the axes
-ax2.set_title('Audio Signal')
-ax4.set_title('Camera Feed')
-
-# Combine ax1 and ax3 into a larger graph
-ax1.remove()
-ax3.remove()
-ax_large = fig.add_subplot(2, 2, (1, 3))
-ax_large.set_title('Larger Graph')
-ax_large.set_ylim(-1, channels+1)
-
-channel_lines = [ax_large.plot([], [], lw=1) for _ in range(channels)]
-# line2, = ax_large.plot([], [], lw=1)
-
-# x axis data points
-x = np.linspace(0, audio_stream.SAMPLESIZE-1, audio_stream.SAMPLESIZE)
-
-
 class FPSCounter:
     def __init__(self):
         self.start_time = time.time()
@@ -235,60 +205,100 @@ class FPSCounter:
         return fps
 
 
-# Initialize FPS counter
-fps_counter = FPSCounter()
+if __name__ == "__main__":
+    # Initialize audio and camera streams
+    audio_stream = AudioStream()
+    camera_stream = CameraStream()
 
+    # set up plotting
+    fig, axs = plt.subplots(2, 2,
+                            gridspec_kw={
+                                'height_ratios': [2, 1],
+                                'width_ratios': [2, 1]},
+                            figsize=(10, 10))
+    (ax1, ax2), (ax3, ax4) = axs
+    ax2.set_xlim(0, audio_stream.SAMPLESIZE-1)
+    ax2.set_ylim(-9999, 9999)
+    line, = ax2.plot([], [], lw=1)
 
-def init():
-    line.set_data([], [])
-    return line,
+    # Assign titles to the axes
+    ax2.set_title('Audio Signal')
+    ax4.set_title('Camera Feed')
 
+    # Combine ax1 and ax3 into a larger graph
+    ax1.remove()
+    ax3.remove()
+    ax_large = fig.add_subplot(2, 2, (1, 3))
+    ax_large.set_title('Larger Graph')
+    ax_large.set_ylim(-1, channels+1)
 
-def animate(i_frame):
+    channel_lines = [ax_large.plot([], [], lw=1) for _ in range(channels)]
+    # line2, = ax_large.plot([], [], lw=1)
 
-    e = eeg_device_reader.peek_latest_data_by_length(50)
-    first = e[0]
-    last = e[-1]
+    # x axis data points
+    x = np.linspace(0, audio_stream.SAMPLESIZE-1, audio_stream.SAMPLESIZE)
 
-    if i_frame % 199 == 0:
-        client.send_message(f'Info. Display {i_frame} frame.')
-        print(
-            first[0], last[0], first[1], last[1],
-            last[1]-first[1], first[2].shape, len(e))
+    # Initialize FPS counter
+    fps_counter = FPSCounter()
 
-    y2 = np.concatenate([d[2] for d in e], axis=1)
-    x2 = np.linspace(0, 1, y2.shape[1])
-    for i in range(channels):
-        channel_lines[i][0].set_data(x2, y2[i]+i)
-    ax_large.set_xlim((x2[0], x2[-1]))
+    def init():
+        line.set_data([], [])
+        return line,
 
-    # Update audio plot
-    y = audio_stream.read_audio()
-    line.set_data(x, y)
+    def animate(i_frame):
+        e = eeg_device_reader.peek_latest_data_by_length(50)
+        first = e[0]
+        last = e[-1]
 
-    # Update camera feed
-    frame = camera_stream.read_frame()
-    if frame is not None:
-        ax4.clear()
-        ax4.imshow(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-        ax4.axis('off')  # Hide axes for the camera feed
-        ax4.set_aspect('auto')  # Set aspect ratio to auto
+        if i_frame % 200 == 0:
+            client.send_message(f'Info. Display {i_frame} frame.')
+            print(
+                first[0], last[0], first[1], last[1],
+                last[1]-first[1], first[2].shape, len(e))
 
-    # Calculate and update FPS in title
-    fps = fps_counter.update()
-    fig.suptitle(f'FPS: {fps:.2f}')
+        y2 = np.concatenate([d[2] for d in e], axis=1)
+        x2 = np.linspace(0, 1, y2.shape[1])
+        for i in range(channels):
+            channel_lines[i][0].set_data(x2, y2[i]+i)
+        ax_large.set_xlim((x2[0], x2[-1]))
 
-    return line,
+        # Update audio plot
+        y = audio_stream.read_audio()
+        line.set_data(x, y)
 
+        # Update camera feed
+        frame = camera_stream.read_frame()
+        if frame is not None:
+            ax4.clear()
+            ax4.imshow(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            ax4.axis('off')  # Hide axes for the camera feed
+            ax4.set_aspect('auto')  # Set aspect ratio to auto
 
-ani = FuncAnimation(fig, animate, init_func=init,
-                    frames=20, interval=20, blit=False)
+        # Calculate and update FPS in title
+        fps = fps_counter.update()
+        fig.suptitle(f'FPS: {fps:.2f}')
 
-plt.show()
-print('--')
+        return line,
 
-# stop and close the audio and camera streams
-audio_stream.close()
-camera_stream.close()
-eeg_device_reader.stop()
-client.close()
+    ani = FuncAnimation(fig, animate, init_func=init,
+                        frames=200, interval=20, blit=False)
+
+    # def check_plot_closed():
+    #     if not plt.fignum_exists(fig.number):
+    #         # stop and close the audio and camera streams
+    #         audio_stream.close()
+    #         camera_stream.close()
+    #         eeg_device_reader.stop()
+    #         client.close()
+    #         return
+    #     mm.root.after(100, check_plot_closed)
+
+    # mm.root.after(100, check_plot_closed)
+    plt.show(block=False)
+    mm.root.mainloop()
+    print('--')
+
+    audio_stream.close()
+    camera_stream.close()
+    eeg_device_reader.stop()
+    client.close()

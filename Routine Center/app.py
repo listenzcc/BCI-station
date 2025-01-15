@@ -369,8 +369,8 @@ class ControlCenter:
 
 
 if __name__ == "__main__":
-    # control_center = ControlCenter(host='192.168.137.1')
-    control_center = ControlCenter()
+    control_center = ControlCenter(host='192.168.137.1')
+    # control_center = ControlCenter()
     control_center.run()
 
 # Client developer instructions:
