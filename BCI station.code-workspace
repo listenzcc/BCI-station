@@ -19,5 +19,9 @@
 			"path": "Simulation workload"
 		}
 	],
-	"settings": {}
+	"settings": {
+		"cSpell.words": [
+			"nicegui"
+		]
+	}
 }

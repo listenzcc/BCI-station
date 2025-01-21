@@ -1,15 +1,50 @@
+# %%
 import time
 import json
 import socket
-import threading
 import pandas as pd
-import tkinter as tk
+
+from enum import Enum
+from nicegui import ui
+from threading import Thread
+from collections import defaultdict
 
 from loguru import logger
 from tqdm.auto import tqdm
+from dataclasses import dataclass
 from urllib.parse import urlparse
 
 logger.add('log/BCI station control center.log', rotation='5 MB')
+
+# %%
+
+
+class ClientStatus(Enum):
+    Connecting = 1
+    Connected = 2
+    Disconnected = 3
+
+
+@dataclass(slots=False)
+class IncomingClient:
+    # Basic information
+    address: str = 'Client address'
+    path: str = 'Path of the client'
+    uid: str = 'UID of the client'
+    # Connection and its quality
+    socket = None
+    netDelay: float = 0
+    netRemoteTime: float = 0
+    netLocalTime: float = 0
+    # GUI stuff
+    status: ClientStatus = ClientStatus.Connecting
+
+    def __init__(self, **kwargs):
+        self.update(**kwargs)
+
+    def update(self, **kwargs):
+        for k, v in kwargs.items():
+            self.__setattr__(k, v)
 
 
 class ControlCenter:
@@ -36,14 +71,14 @@ class ControlCenter:
         self.server_socket.bind((self.host, self.port))
         self.server_socket.listen(5)
         logger.info(f"Server started on {self.host}:{self.port}")
-        threading.Thread(target=self.accept_clients, daemon=True).start()
+        Thread(target=self.accept_clients, daemon=True).start()
 
     def accept_clients(self):
         """Accept incoming client connections."""
         while True:
             client_socket, client_address = self.server_socket.accept()
             logger.info(f"Client {client_address} connected")
-            threading.Thread(target=self.handle_client, args=(
+            Thread(target=self.handle_client, args=(
                 client_socket, client_address)).start()
 
     def handle_client(self, client_socket, client_address):
@@ -84,33 +119,25 @@ class ControlCenter:
             client_path = client_info[0]
             client_uid = client_info[1]
 
-            # New client is coming.
-            # Add into the client_list,
-            # Update its status.
-            self.clients[client_address] = {
+            # Make the client object
+            ic = IncomingClient()
+            ic.update(**{
                 # Basic information of the socket.
                 'address': client_address,
                 'socket': client_socket,
                 'path': client_path,
                 'uid': client_uid,
-                # The UI components for the socket.
-                'frame': None,
-                'latest_message': tk.StringVar(),
-                'messages': tk.IntVar(),
-                # The connection quality of the socket.
-                # The netRemoteTime and netLocalTime is used to convert between the remote time and the local time.
-                # Estimated delay of transaction.
-                'netDelay': None,
-                # The remote timestamp.
-                'netRemoteTime': None,
-                # The local timestamp.
-                'netLocalTime': None
-            }
+            })
+            self.clients[client_address] = ic
+
+            ic.status = ClientStatus.Connecting
 
             # Echo package chunk.
             self.send_echo_packages(client_socket, client_address)
 
-            self.update_client_list_tkUI()
+            ic.status = ClientStatus.Connected
+
+            self.update_gui()
 
             logger.info(f'Client {self.clients[client_address]} comes.')
 
@@ -151,15 +178,13 @@ class ControlCenter:
 
         finally:
             client_socket.close()
-            del self.clients[client_address]
-            self.update_client_list_tkUI()
+            self.clients[client_address].status = ClientStatus.Disconnected
+            self.update_gui()
             self.update_latest_message(
                 client_address, f"{client_path} ({client_uid}) disconnected")
 
     def handle_message(self, message, client_address):
-        meaningful_message = False
-
-        src_client = self.clients[client_address]
+        sic: IncomingClient = self.clients[client_address]
 
         # TODO: Handle the message from the client
         if message.startswith("Echo"):
@@ -188,34 +213,33 @@ class ControlCenter:
 
             # Transfer it to the client with dst path
             count = 0
-            for addr, dst_client in self.clients.items():
+            for _, v in self.clients.items():
+                dic: IncomingClient = v
+                if dic.status is not ClientStatus.Connected:
+                    continue
                 # Check if the dst_client matches with the letter's dst.
-                if dst_client['path'] == path and any((dst_client['uid'] == uid, len(uid) == 0)):
+                if dic.path == path and any((dic.uid == uid, len(uid) == 0)):
                     # Make the new letter.
                     letter = raw_letter.copy()
                     # Translate the timestamp into dst's timestamp.
                     t = letter['_timestamp']
                     # Translate src time into local time
-                    t = t - src_client['netRemoteTime'] + \
-                        src_client['netLocalTime']
+                    t = t - sic.netRemoteTime + sic.netLocalTime
                     # Translate local time into dst time
-                    t = t - dst_client['netLocalTime'] + \
-                        dst_client['netRemoteTime']
+                    t = t - dic.netLocalTime + dic.netRemoteTime
                     letter['_timestamp'] = t
-                    self.send_message(dst_client['socket'], json.dumps(letter))
-                    logger.info(f'Translated {letter} to {addr}')
+                    self.send_message(dic['socket'], json.dumps(letter))
+                    logger.info(f'Translated {letter} to {dic.address}')
                     count += 1
 
             # If the letter is not delivered, log the warning.
             if count == 0:
                 logger.warning(f'Received {raw_letter}, but did not deliver.')
         else:
-            meaningful_message = True
             logger.warning(f'Can not handle message: {message}')
 
         # Update the latest message.
-        self.update_latest_message(
-            client_address, message, meaningful_message=True)
+        self.update_latest_message(client_address, message)
 
         return message
 
@@ -242,7 +266,7 @@ class ControlCenter:
             netRemoteTime=float(df.iloc[0]['tClient']),
             netLocalTime=float(df.iloc[0]['tServer'])
         )
-        self.clients[client_address].update(connection_quality)
+        self.clients[client_address].update(**connection_quality)
         return df
 
     def send_echo_package(self, client_socket):
@@ -307,14 +331,11 @@ class ControlCenter:
     def update_latest_message(self, client_address, message: str, meaningful_message: bool = True):
         """Update the latest message of the client."""
         client_info = self.clients.get(client_address)
-        if client_info:
-            # Only update the latest message when it is the meaningful message.
-            if meaningful_message:
-                client_info['latest_message'].set(message)
-            # Ascending the messages count.
-            client_info['messages'].set(client_info['messages'].get()+1)
 
-    def update_client_list_tkUI(self):
+    def update_gui(self):
+        pass
+
+    def update_gui__(self):
         """Update the client list in the Tkinter GUI."""
 
         # Destroy the existing clients.
@@ -340,18 +361,6 @@ class ControlCenter:
             client_info['frame'] = frame
             logger.debug(f'Updated UI for client {client_address}')
 
-    def start_gui(self):
-        """Start the Tkinter GUI."""
-        self.gui = tk.Tk()
-        self.gui.title("Control Center")
-        self.gui.geometry("600x400")
-        tk.Label(self.gui, text="Control Center Monitoring").pack()
-        self.client_list_frame = tk.Frame(self.gui)
-        self.client_list_frame.pack()
-        tk.Button(self.gui, text="Exit", command=self.close_server).pack()
-        self.gui.protocol("WM_DELETE_WINDOW", self.close_server)
-        self.gui.mainloop()
-
     def close_server(self):
         """Close the server and all client connections."""
         for client_info in tqdm(list(self.clients.values()), 'Closing'):
@@ -365,13 +374,77 @@ class ControlCenter:
     def run(self):
         """Run the control center."""
         self.start_server()
-        self.start_gui()
 
 
-if __name__ == "__main__":
-    # control_center = ControlCenter(host='192.168.137.1')
-    control_center = ControlCenter()
-    control_center.run()
+# %%
+homepage = ui.card()
+
+# control_center = ControlCenter(host='192.168.137.1')
+control_center = ControlCenter()
+# control_center.run()
+# Thread(target=control_center.run, daemon=True).start()
+
+
+class NiceGuiManager(object):
+    pages: dict = defaultdict(dict)
+    cc = control_center
+    tabs = ui.tabs().classes('w-full')
+
+    def timer_callback(self):
+        print(f'Timer callback at {time.time()}')
+        print('clients', self.cc.clients)
+        print('pages', self.pages)
+        for _, ic in self.cc.clients.items():
+            ic: IncomingClient = ic
+
+            # If already has the page.
+            # TODO: Update the page.
+            if ic.address in self.pages:
+                dct = self.pages[ic.address]
+                dct['status_label'].text = f'Status: {ic.status}'
+                continue
+
+            print('ic', ic)
+
+            # Create the new page.
+            # TODO: Create the decent page.
+            with self.tabs:
+                page = ui.tab(f'{ic.path}/{ic.uid}/{ic.address}')
+
+            print('tabs', self.tabs)
+
+            with ui.tab_panels(self.tabs, value=page).classes('w-full'):
+                with ui.tab_panel(page):
+                    ui.label(f"Client {ic.path} ({ic.uid})")
+                    ui.label(f"Address: {ic.address}")
+                    status_label = ui.label(f'Status: {ic.status}')
+                    quality_card = ui.card()
+                    message_log = ui.log(max_lines=10)
+
+            with quality_card:
+                ui.spinner(size='lg')
+                # ui.label(f"Delay: {self.netDelay:.4f} | Offset: {self.netRemoteTime - self.netLocalTime:.4f}")
+
+            self.pages[ic.address].update(
+                page=page,
+                status_label=status_label,
+                quality_card=quality_card,
+                message_log=message_log)
+        ui.update()
+        return
+
+
+# %%
+
+if __name__ in ("__main__", "__mp_main__"):
+    print(f'Running in {__name__} mode.')
+
+    ngm = NiceGuiManager()
+    if __name__ == "__mp_main__":
+        Thread(target=ngm.cc.run, daemon=True).start()
+
+    ui.timer(1, ngm.timer_callback)
+    ui.run(title='BCI station')
 
 # Client developer instructions:
 # To send a message, first send the advanced key code as an 8-byte value.
