@@ -1,22 +1,25 @@
 {
 	"folders": [
 		{
-			"path": ".",
+			"path": "."
 		},
 		{
-			"path": "Routine Center",
+			"path": "Routine Center"
 		},
 		{
-			"path": "EEG device side",
+			"path": "EEG device side"
 		},
 		{
-			"path": "HID side",
+			"path": "HID side"
 		},
 		{
-			"path": "SSVEP-offline-notebook",
+			"path": "SSVEP-offline-notebook"
 		},
 		{
 			"path": "Simulation workload"
+		},
+		{
+			"path": "SSVEP Screen"
 		}
 	],
 	"settings": {

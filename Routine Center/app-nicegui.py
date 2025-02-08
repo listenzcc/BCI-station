@@ -9,6 +9,9 @@ from nicegui import ui
 from threading import Thread
 from collections import defaultdict
 
+import queue
+from queue import Queue
+
 from loguru import logger
 from tqdm.auto import tqdm
 from dataclasses import dataclass
@@ -36,8 +39,10 @@ class IncomingClient:
     netDelay: float = 0
     netRemoteTime: float = 0
     netLocalTime: float = 0
-    # GUI stuff
+    # Status of the client
     status: ClientStatus = ClientStatus.Connecting
+    # Message queue
+    queue: Queue = Queue(1000)
 
     def __init__(self, **kwargs):
         self.update(**kwargs)
@@ -51,6 +56,10 @@ class ControlCenter:
     host = 'localhost'
     port = 12345
     valid_key = b'12345678'
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    incoming_clients = {}
+    echo_data = []
+    message_queue = Queue(100)
 
     def __init__(self, host=None, port=None, valid_key=None):
         if host:
@@ -59,11 +68,6 @@ class ControlCenter:
             self.port = port
         if valid_key:
             self.valid_key = valid_key
-
-        self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.clients = {}
-        self.gui = None
-        self.echo_data = []
         logger.info(f"Initialized control center {self}")
 
     def start_server(self):
@@ -128,7 +132,7 @@ class ControlCenter:
                 'path': client_path,
                 'uid': client_uid,
             })
-            self.clients[client_address] = ic
+            self.incoming_clients[client_address] = ic
 
             ic.status = ClientStatus.Connecting
 
@@ -139,7 +143,8 @@ class ControlCenter:
 
             self.update_gui()
 
-            logger.info(f'Client {self.clients[client_address]} comes.')
+            logger.info(
+                f'Client {self.incoming_clients[client_address]} comes.')
 
             # Keep listening for the messages from the client.
             while True:
@@ -170,6 +175,11 @@ class ControlCenter:
 
                 self.handle_message(message, client_address)
 
+                try:
+                    ic.queue.put_nowait(message)
+                except queue.Full:
+                    logger.warning('Message queue is full.')
+
                 # The next while loop.
                 continue
 
@@ -178,13 +188,13 @@ class ControlCenter:
 
         finally:
             client_socket.close()
-            self.clients[client_address].status = ClientStatus.Disconnected
+            self.incoming_clients[client_address].status = ClientStatus.Disconnected
             self.update_gui()
             self.update_latest_message(
                 client_address, f"{client_path} ({client_uid}) disconnected")
 
     def handle_message(self, message, client_address):
-        sic: IncomingClient = self.clients[client_address]
+        sic: IncomingClient = self.incoming_clients[client_address]
 
         # TODO: Handle the message from the client
         if message.startswith("Echo"):
@@ -213,7 +223,7 @@ class ControlCenter:
 
             # Transfer it to the client with dst path
             count = 0
-            for _, v in self.clients.items():
+            for _, v in self.incoming_clients.items():
                 dic: IncomingClient = v
                 if dic.status is not ClientStatus.Connected:
                     continue
@@ -263,10 +273,11 @@ class ControlCenter:
 
         connection_quality = dict(
             netDelay=float(df.iloc[0]['delay']),
-            netRemoteTime=float(df.iloc[0]['tClient']),
+            netRemoteTime=float(df.iloc[0]['tClient']) +
+            float(df.iloc[0]['delay'])/2,
             netLocalTime=float(df.iloc[0]['tServer'])
         )
-        self.clients[client_address].update(**connection_quality)
+        self.incoming_clients[client_address].update(**connection_quality)
         return df
 
     def send_echo_package(self, client_socket):
@@ -330,40 +341,14 @@ class ControlCenter:
 
     def update_latest_message(self, client_address, message: str, meaningful_message: bool = True):
         """Update the latest message of the client."""
-        client_info = self.clients.get(client_address)
+        client_info = self.incoming_clients.get(client_address)
 
     def update_gui(self):
         pass
 
-    def update_gui__(self):
-        """Update the client list in the Tkinter GUI."""
-
-        # Destroy the existing clients.
-        for widget in self.client_list_frame.winfo_children():
-            widget.destroy()
-
-        # Rebuild the client list into the frame (self.client_list_frame).
-        for client_address, client_info in self.clients.items():
-            frame = tk.Frame(self.client_list_frame)
-            # Basic information.
-            tk.Label(frame,
-                     text=f"{client_info['path']} ({client_info['uid']}) {client_address}").pack()
-            # Network information.
-            tk.Label(frame,
-                     text=f"Delay: {client_info['netDelay']:.4f} | Offset: {client_info['netRemoteTime'] - client_info['netLocalTime']:.4f}").pack()
-            # Latest message.
-            tk.Label(frame,
-                     textvariable=client_info['latest_message']).pack()
-            # Messages.
-            tk.Label(frame,
-                     textvariable=client_info['messages']).pack()
-            frame.pack()
-            client_info['frame'] = frame
-            logger.debug(f'Updated UI for client {client_address}')
-
     def close_server(self):
         """Close the server and all client connections."""
-        for client_info in tqdm(list(self.clients.values()), 'Closing'):
+        for client_info in tqdm(list(self.incoming_clients.values()), 'Closing'):
             client_info['socket'].close()
             logger.info(f'Client {client_info} closed.')
         self.server_socket.close()
@@ -381,55 +366,94 @@ homepage = ui.card()
 
 # control_center = ControlCenter(host='192.168.137.1')
 control_center = ControlCenter()
-# control_center.run()
-# Thread(target=control_center.run, daemon=True).start()
 
 
 class NiceGuiManager(object):
     pages: dict = defaultdict(dict)
-    cc = control_center
     tabs = ui.tabs().classes('w-full')
+    cc = control_center
+    thread_book = {}
+
+    def log_rolling_thread(self, message_log: ui.log, message_queue: Queue, thread_name: str):
+        '''
+        Log rolling thread for the message log.
+
+        :params message_log (ui.log): the message log widget.
+        :params message_queue (Queue): The queue to get the message.
+        :params thread_name (str): The name of the thread.
+        '''
+        while thread_name in self.thread_book:
+            # Set the timeout to avoid blocking forever.
+            # And handle the empty exception in case of empty queue situation.
+            try:
+                message_log.push(message_queue.get(timeout=1))
+            except queue.Empty:
+                continue
+        message_log.push('Log rolling thread stopped.')
 
     def timer_callback(self):
+        print('')
         print(f'Timer callback at {time.time()}')
-        print('clients', self.cc.clients)
-        print('pages', self.pages)
-        for _, ic in self.cc.clients.items():
+        # print('clients', self.cc.incoming_clients)
+        # print('pages', self.pages)
+        for _, ic in self.cc.incoming_clients.items():
             ic: IncomingClient = ic
+            thread_name = ic.address
+
+            if ic.status is ClientStatus.Disconnected and thread_name in self.thread_book:
+                self.thread_book.pop(ic.address)
 
             # If already has the page.
             # TODO: Update the page.
             if ic.address in self.pages:
                 dct = self.pages[ic.address]
                 dct['status_label'].text = f'Status: {ic.status}'
-                continue
+                dct['quality_label'].text = f"Delay: {ic.netDelay:.4f} | Offset: {
+                    ic.netRemoteTime - ic.netLocalTime:.4f}"
 
-            print('ic', ic)
+                if ic.status is ClientStatus.Disconnected:
+                    dct['spinner'].set_visibility(False)
+
+                continue
 
             # Create the new page.
             # TODO: Create the decent page.
+            # Append new card.
             with self.tabs:
-                page = ui.tab(f'{ic.path}/{ic.uid}/{ic.address}')
-
-            print('tabs', self.tabs)
+                page = ui.tab(f'{ic.path} | {ic.uid} | {ic.address}')
 
             with ui.tab_panels(self.tabs, value=page).classes('w-full'):
                 with ui.tab_panel(page):
-                    ui.label(f"Client {ic.path} ({ic.uid})")
-                    ui.label(f"Address: {ic.address}")
-                    status_label = ui.label(f'Status: {ic.status}')
+                    info_card = ui.card()
                     quality_card = ui.card()
                     message_log = ui.log(max_lines=10)
 
+            with info_card:
+                with ui.list().props('dense separator'):
+                    ui.item(f"Client: {ic.path} ({ic.uid})")
+                    ui.item(f"Address: {ic.address}")
+
             with quality_card:
-                ui.spinner(size='lg')
-                # ui.label(f"Delay: {self.netDelay:.4f} | Offset: {self.netRemoteTime - self.netLocalTime:.4f}")
+                with ui.row():
+                    spinner = ui.spinner('audio', size='lg')
+                    with ui.column():
+                        quality_label = ui.label(
+                            f"Delay: {ic.netDelay:.4f} | Offset: {ic.netRemoteTime - ic.netLocalTime:.4f}")
+                        status_label = ui.label(f'Status: {ic.status}')
 
             self.pages[ic.address].update(
                 page=page,
+                spinner=spinner,
                 status_label=status_label,
-                quality_card=quality_card,
+                quality_label=quality_label,
                 message_log=message_log)
+
+            # Register the log rolling thread, if the thread is not started.
+            if thread_name not in self.thread_book:
+                self.thread_book[thread_name] = 'started'
+                Thread(target=self.log_rolling_thread,
+                       args=(message_log, ic.queue, thread_name), daemon=True).start()
+
         ui.update()
         return
 
