@@ -17,6 +17,7 @@ Functions:
 
 # %% ---- 2025-02-08 ------------------------
 # Requirements and constants
+from omegaconf import OmegaConf
 import time
 from timer import RunningTimer
 import sys
@@ -34,8 +35,13 @@ from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import QMainWindow, QApplication, QLabel
 from keyboard_layout import MyKeyboard
 
+import socket
+import json
+
 # Initialize the QApplication in the first place.
 qapp = QApplication(sys.argv)
+
+CONFIG = OmegaConf.load('config.yaml')
 
 small_font = ImageFont.truetype("arial.ttf", 24)
 large_font = ImageFont.truetype("arial.ttf", 64)
@@ -121,7 +127,7 @@ class SSVEPScreenLayout:
         ws = np.linspace(self.w, self.e, self.columns+1)[:-1]
         d = int(ws[1] - ws[0])
         rows = int((self.s - self.n) / d)
-        patch_size = int((ws[1] - ws[0]) * (1-self.paddingRatio))
+        patch_size = int(d * (1-self.paddingRatio))
 
         layout = [
             dict(patch_idx=patch_idx,
@@ -140,8 +146,8 @@ class QtComponents:
     qapp = qapp
     window = QMainWindow()
     pixmap_container = QLabel(window)
-    width = None
-    height = None
+    width = CONFIG.SSVEPScreen.width  # None
+    height = CONFIG.SSVEPScreen.height  # None
 
     def __init__(self):
         self.prepare_window()
@@ -163,26 +169,30 @@ class QtComponents:
 
         # Disable frame and keep the window on the top layer
         # It is necessary to set the FramelessWindowHint for the WA_TranslucentBackground works
-        self.window.setWindowFlags(Qt.WindowType.FramelessWindowHint |
-                                   Qt.WindowType.WindowStaysOnTopHint)
+        # self.window.setWindowFlags(Qt.WindowType.FramelessWindowHint |
+        #                            Qt.WindowType.WindowStaysOnTopHint)
 
         # Only hide window frame
         # self.window.setWindowFlags(Qt.WindowType.FramelessWindowHint)
 
         # Fetch the screen size and set the size for the window
         screen = self.qapp.primaryScreen()
-        self.width = screen.size().width() // 2
-        self.height = screen.size().height()
+        screen_width = screen.size().width()
+        screen_height = screen.size().height()
+        # self.width = screen.size().width() // 2
+        # self.height = screen.size().height()
 
         # Set the window size
         self.window.resize(self.width, self.height)
 
         # Put the window to the right
-        self.window.move(self.width, 0)
+        self.window.move(screen_width-self.width, 0)
 
         # Set the pixmap_container accordingly,
         # and it is within the window bounds
         self.pixmap_container.setGeometry(0, 0, self.width, self.height)
+
+        self.window.setWindowFlags(Qt.WindowType.WindowStaysOnTopHint)
 
         logger.debug(
             f'Reset window size to {self.width}, {self.width}, and reset other stuff')
@@ -218,6 +228,12 @@ class SSVEPScreenPainter(AdditionalFunctions, SSVEPFrequency):
     on_going_thread: Thread = None
     rlock = RLock()
 
+    # Keyboard layout parameters
+    header_height: int = CONFIG.SSVEPScreen.headerHeight  # 200
+    num_columns: int = 6
+    current_layout: list = []
+    current_cue: tuple = None
+
     def __init__(self):
         super().__init__()
         self._handle_focus_change()
@@ -232,14 +248,15 @@ class SSVEPScreenPainter(AdditionalFunctions, SSVEPFrequency):
         self.img_drawer = ImageDraw.Draw(self.img)
 
         # Repaint with default img for startup
-        self.put_img_into_pixmap_container()
+        self.repaint()
 
         logger.debug(f'Make img, img_drawer as {self.img}, {self.img_drawer}')
         return
 
-    def put_img_into_pixmap_container(self, img: Image = None):
+    def repaint(self, img: Image = None):
         '''
         Repaint with the given img.
+        It puts img into pixmap_container
         If it is None, using self.img as default.
 
         The pipeline is
@@ -299,7 +316,6 @@ class SSVEPScreenPainter(AdditionalFunctions, SSVEPFrequency):
 
     def main_loop(self):
         ''' Main loop for SSVEP display. '''
-        header_height = 400
 
         # Reset the timer.
         self.rt.reset()
@@ -307,7 +323,7 @@ class SSVEPScreenPainter(AdditionalFunctions, SSVEPFrequency):
         # Reset the ssvep layout box.
         ssvep_screen_layout = SSVEPScreenLayout()
         ssvep_screen_layout.reset_box(
-            0, header_height, self.width, self.height)
+            0, self.header_height, self.width, self.height)
 
         # The flipping rate is slower when the speed_factor is lower.
         speed_factor = 1
@@ -315,11 +331,36 @@ class SSVEPScreenPainter(AdditionalFunctions, SSVEPFrequency):
         change_char_step = 6  # seconds
         change_char_next_passed = change_char_step
 
-        layout = ssvep_screen_layout.get_layout()
-        num_keys = len(layout)
-        fixed_positions = {e['patch_idx']: k for e, k in zip(
-            layout[-3:], ['*Back', '*Space', '*Enter'])}
-        keys, cue, cue_idx = self.mkb.mk_layout(num_keys, fixed_positions)
+        def setup_trial():
+            # Acquire the layout.
+            ssvep_screen_layout.reset_columns(self.num_columns)
+            layout = ssvep_screen_layout.get_layout()
+
+            # Generate keys.
+            # It also generates cue and cue_idx.
+            num_keys = len(layout)
+            fixed_positions = {e['patch_idx']: k for e, k in zip(
+                layout[-3:], ['*Back', '*Space', '*Enter'])}
+            keys, cue, cue_idx = self.mkb.mk_layout(num_keys, fixed_positions)
+
+            # Fill the keys, cue, and cue_idx into layout.
+            for i, v in enumerate(layout):
+                omega, phase = self.get_omega_phase(i)
+                v.update({
+                    '_char': keys[i],
+                    '_cue_flag': i == cue_idx,
+                    '_omega': omega,
+                    '_phase': phase,
+                    '__decoded': None
+                })
+
+            self.current_layout = layout
+            self.current_cue = (cue, cue_idx)
+
+            return layout, cue, cue_idx
+
+        # Make the first trial
+        layout, cue, cue_idx = setup_trial()
 
         self.reset_img()
         while self.rt.running:
@@ -332,16 +373,26 @@ class SSVEPScreenPainter(AdditionalFunctions, SSVEPFrequency):
             # Modify the passed seconds with speed_factor.
             z = passed * speed_factor
 
+            # It is time to process the latest trial.
             if z > change_char_next_passed:
-                change_char_next_passed += change_char_step
+                # If has cue
+                cue, cue_idx = self.current_cue
+                if cue:
+                    # it is corrected decoded, append into the input_buffer.
+                    if self.current_layout[cue_idx]['__decoded'] == self.current_layout[cue_idx]['_omega']:
+                        self.mkb.append_input_buffer(cue)
+                    # it is not corrected decoded, push it back into the cue_sequence
+                    else:
+                        self.mkb.push_cue_sequence(cue)
+
+                # Get the layout of the next trial.
+                layout, cue, cue_idx = setup_trial()
+
+                # Reset the image.
                 self.reset_img()
 
-                layout = ssvep_screen_layout.get_layout()
-                num_keys = len(layout)
-                fixed_positions = {e['patch_idx']: k for e, k in zip(
-                    layout[-3:], ['*Back', '*Space', '*Enter'])}
-                keys, cue, cue_idx = self.mkb.mk_layout(
-                    num_keys, fixed_positions)
+                # Reset the next judgement time.
+                change_char_next_passed += change_char_step
 
             # Compute trial ratio, always in (0, 1)
             tr = 1-(change_char_next_passed - z) / change_char_step
@@ -350,50 +401,59 @@ class SSVEPScreenPainter(AdditionalFunctions, SSVEPFrequency):
             with self.rlock:
                 # Clear only the text area before drawing new text
                 self.img_drawer.rectangle(
-                    (0, 0, self.width, header_height), fill=(0, 0, 0, 0))
+                    (0, 0, self.width, self.header_height), fill=(0, 0, 0, 0))
 
                 self.img_drawer.text(
-                    (0, header_height/2), f'{z:.2f} | {seconds_in_trial:.2f}', font=large_font, anchor='lt')
+                    (0, self.header_height/2), f'{z:.2f} | {seconds_in_trial:.2f}', font=large_font, anchor='lt')
 
                 # Draw the progressing bar.
-                self.img_drawer.rectangle((0, header_height-2, self.width, header_height),
+                self.img_drawer.rectangle((0, self.header_height-2, self.width, self.header_height),
                                           fill=(150, 150, 150, 0))
-                self.img_drawer.rectangle((0, header_height-2, (1-tr)*self.width, header_height),
+                self.img_drawer.rectangle((0, self.header_height-2, (1-tr)*self.width, self.header_height),
                                           fill=(150, 150, 150, 150))
 
                 # Draw the patch.
-                for patch in layout:
+                for patch in self.current_layout:
                     x = patch['x']
                     y = patch['y']
                     sz = patch['patch_size']
                     idx = patch['patch_idx']
+                    _char = patch['_char']
+                    omega = patch['_omega']
+                    phase = patch['_phase']
+                    cue_flag = patch['_cue_flag']
+                    decoded = patch['__decoded']
 
                     # Draw the patch.
                     # Compute omega and phase.
-                    omega, phase = self.get_omega_phase(idx)
                     c = 0.5 + 0.5 * \
                         np.cos(seconds_in_trial*omega*2*np.pi + phase)
                     c = int(c*255)
 
-                    # print(patch, c)
+                    # Draw the patch.
                     self.img_drawer.rectangle((x, y, x+sz, y+sz),
                                               fill=(c, c, c, c))
                     # Draw the idx.
                     self.img_drawer.text((x, y), f'{idx}', font=small_font)
 
                     # Draw the char.
-                    _char = keys[idx]
                     _font = large_font if len(_char) == 1 else small_font
                     self.img_drawer.text(
                         (x+sz/2, y+sz/2), _char, font=_font, anchor='mm')
 
                     # Draw the cue hinter.
-                    if idx == cue_idx:
+                    if cue_flag:
                         self.img_drawer.rectangle(
                             (x+sz*0.8, y, x+sz, y+sz*0.2), fill=(150, 0, 0, 255))
+                        patch['__decoded'] = omega
+
+                    # Draw the decoded frame.
+                    if omega == decoded:
+                        self.img_drawer.rectangle(
+                            (x-1, y-1, x+sz+1, y+sz+1), outline='green', width=3)
 
             # Blink on the right top corner in 50x50 pixels size if not focused
-            if not self.flag_has_focus:
+            if False and not self.flag_has_focus:
                 c = tuple(np.random.randint(0, 256, 3))
                 self.img_drawer.rectangle(
                     (self.width-50, 0, self.width, 50), fill=c)
@@ -410,6 +470,144 @@ class SSVEPScreenPainter(AdditionalFunctions, SSVEPFrequency):
     def _on_paint_subsystem(self):
         '''Subsystem requires rewrite'''
         return
+
+
+class ResponseStatus(Enum):
+    # Everything is fine.
+    OK = 'OK'
+    # Message is good, but can not operate properly.
+    FAIL = 'FAIL'
+    # Message is bad.
+    ERROR = 'ERROR'
+
+
+RS = ResponseStatus
+
+
+def dumps(dct):
+    '''
+    Dumps the dictionary with json.
+    It converts the Enum into the value.
+
+    :param dct: input dictionary.
+    '''
+
+    return json.dumps({e: v.value if isinstance(v, Enum) else v for e, v in dct.items()})
+
+
+class SSVEPScreenPainterWithSocket(SSVEPScreenPainter):
+    host = CONFIG.SSVEPScreen.host  # 'localhost'
+    port = CONFIG.SSVEPScreen.port  # 36501
+    encoding = CONFIG.SSVEPScreen.encoding  # 'utf-8'
+    socket_is_running = False
+
+    def __init__(self):
+        super().__init__()
+
+    def start_socket_server(self):
+        Thread(target=self.serve_forever, daemon=True).start()
+
+    def stop_socket_server(self):
+        self.socket_is_running = False
+
+    def serve_forever(self):
+        ''' Establish the socket server to handle client requests. '''
+        if self.socket_is_running:
+            logger.warning(
+                f'Socket server is already running {self.host}:{self.port}')
+            return
+
+        self.socket_is_running = True
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
+            server_socket.bind((self.host, self.port))
+            server_socket.listen()
+            logger.info(f'Socket server listening on {self.host}:{self.port}')
+
+            while self.socket_is_running:
+                client_socket, addr = server_socket.accept()
+                with client_socket:
+                    # logger.info(f'Connected by {addr}')
+                    while True:
+                        # Read message length header
+                        raw_msglen = self._recv_all(client_socket, 4)
+                        if not raw_msglen:
+                            break
+                        msglen = int.from_bytes(raw_msglen, byteorder='big')
+                        # Read the message data
+                        data = self._recv_all(client_socket, msglen)
+                        if not data:
+                            break
+                        response = self.handle_message(
+                            data.decode(self.encoding))
+                        response_bytes = response.encode(self.encoding)
+                        # Send response with length header
+                        client_socket.sendall(len(response_bytes).to_bytes(
+                            4, byteorder='big') + response_bytes)
+
+            # logger.info('Socket connection stopped')
+            return
+
+    def _recv_all(self, sock, n):
+        ''' Helper function to receive n bytes or return None if EOF is hit '''
+        data = bytearray()
+        while len(data) < n:
+            packet = sock.recv(n - len(data))
+            if not packet:
+                return None
+            data.extend(packet)
+        return data
+
+    def handle_message(self, message):
+        ''' Handle message from client. '''
+        try:
+            command = json.loads(message)
+            action = command.get('action')
+
+            # Set num columns.
+            if action == 'set_num_columns':
+                if n := command.get('num_columns'):
+                    self.num_columns = int(n)
+                    return dumps({'status': RS.OK})
+                return dumps({'status': RS.FAIL})
+
+            # Get input buffer.
+            elif action == 'get_input_buffer':
+                return dumps({'status': RS.OK, 'input_buffer': self.mkb.input_buffer})
+
+            # Get cue sequence.
+            elif action == 'get_cue_sequence':
+                return dumps({'status': RS.OK, 'cue_sequence': self.mkb.cue_sequence})
+
+            # Get current cue.
+            elif action == 'get_current_cue':
+                if i := self.current_cue[1]:
+                    return dumps({'status': RS.OK, 'current_cue': self.current_layout[i]})
+                return dumps({'status': RS.FAIL, 'message': 'Not cue.'})
+
+            # Get current layout.
+            elif action == 'get_current_layout':
+                return dumps({'status': RS.OK, 'current_layout': self.current_layout})
+
+            # Append cue sequence.
+            elif action == 'append_cue_sequence':
+                if cues := command.get('cues'):
+                    cues = [e for e in cues]
+                    print(cues)
+                    self.mkb.extend_cue_sequence(cues)
+                    print(self.mkb.cue_sequence)
+                    return dumps({'status': RS.OK})
+                return dumps({'status': RS.FAIL})
+
+            # Shouldn't happen.
+            assert False, 'Invalid message'
+
+        except Exception as e:
+            logger.error(f'Error handling message: {e}')
+            return dumps({'status': RS.ERROR, 'exception': str(e)})
+
+        finally:
+            # logger.debug(f'Received: {message}...')
+            pass
 
 
 # %% ---- 2025-02-08 ------------------------

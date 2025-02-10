@@ -1,0 +1,10 @@
+NiceGUI:
+  port: 36502
+
+SSVEPScreen:
+  host: "localhost"
+  port: 36501
+  encoding: "utf-8"
+  width: 800
+  height: 800
+  headerHeight: 200

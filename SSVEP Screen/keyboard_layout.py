@@ -35,9 +35,30 @@ class CueSystem:
             cue = None
         return cue
 
-    def append_cue_sequence(self, lst: list):
-        [self.cue_sequence.append(e) for e in lst]
-        logger.debug(f'Appended cue sequence {lst}')
+    def push_cue_sequence(self, s: str, idx: int = 0):
+        '''
+        Push into the cue sequence.
+
+        :param s: the string to push.
+        :param idx: the index to push into.
+
+        :return: the updated cue sequence.
+        '''
+
+        self.cue_sequence.insert(idx, s)
+        logger.debug(f'Pushed cue sequence in {idx}: {self.cue_sequence}')
+        return self.cue_sequence
+
+    def extend_cue_sequence(self, lst: Iterable):
+        '''
+        Extend the cue sequence.
+
+        :param lst: the iterable to extend.
+
+        :return: the updated cue sequence.
+        '''
+        self.cue_sequence.extend(lst)
+        logger.debug(f'Extended cue sequence {self.cue_sequence}')
         return self.cue_sequence
 
     def clear_cue_sequence(self):
@@ -57,6 +78,8 @@ class KeyboardLayout(CueSystem):
     def mk_layout(self, num_keys: int = None, fixed_position_keys: dict = None, cue_idx: int = None):
         '''
         Make the layout for the given information.
+
+        The output keys is dict as {i: key}
 
         :param num_keys int: number of keys.
         :param fixed_position_keys dict: the fixed position keys.
@@ -100,7 +123,9 @@ class InputSystem:
         return len(self.input_buffer)
 
     def clear_input_buffer(self):
+        output = [e for e in self.input_buffer]
         self.input_buffer = []
+        return output
 
     def append_input_buffer(self, inp):
         '''

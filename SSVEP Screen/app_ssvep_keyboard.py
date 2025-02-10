@@ -21,9 +21,10 @@ Functions:
 import sys
 from loguru import logger
 from PyQt6.QtCore import Qt, QTimer
-from ssvep_keyboard import SSVEPScreenPainter
+from ssvep_keyboard import SSVEPScreenPainter, SSVEPScreenPainterWithSocket
 
-ssp = SSVEPScreenPainter()
+# ssp = SSVEPScreenPainter()
+ssp = SSVEPScreenPainterWithSocket()
 
 # %% ---- 2025-02-08 ------------------------
 # Function and class
@@ -72,7 +73,7 @@ def start_display():
 
     def _on_timeout():
         if img := ssp.get_img_safety():
-            ssp.put_img_into_pixmap_container(img)
+            ssp.repaint(img)
 
     timer = QTimer()
     timer.timeout.connect(_on_timeout)
@@ -89,6 +90,7 @@ if __name__ == '__main__':
     # Bind the _about_to_quit and _on_key_pressed methods
     ssp.qapp.aboutToQuit.connect(_about_to_quit)
     ssp.window.keyPressEvent = _on_key_pressed
+    ssp.start_socket_server()
 
     start_display()
 
