@@ -35,14 +35,18 @@ def send_command(command):
     encoding = CONFIG.SSVEPScreen.encoding  # 'utf-8'
     '''Send a command to the SSVEP keyboard socket server and return the response.'''
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.connect((host, port))
-        s.sendall(len(command).to_bytes(
-            4, byteorder='big') + command.encode(encoding))
-        raw_msglen = s.recv(4)
-        if not raw_msglen:
-            return None
-        msglen = int.from_bytes(raw_msglen, byteorder='big')
-        response = s.recv(msglen)
+        s.settimeout(0.1)
+        try:
+            s.connect((host, port))
+            s.sendall(len(command).to_bytes(
+                4, byteorder='big') + command.encode(encoding))
+            raw_msglen = s.recv(4)
+            if not raw_msglen:
+                return None
+            msglen = int.from_bytes(raw_msglen, byteorder='big')
+            response = s.recv(msglen)
+        except (ConnectionRefusedError, TimeoutError) as err:
+            return json.dumps({'error': f'{err}'})
         return response.decode(encoding)
 
 
@@ -68,19 +72,37 @@ def append_cue_sequence(cues):
     ui.notify(f'Append cue sequence response: {response}')
 
 
+def toggle_window_frame():
+    '''Toggle the window frame.'''
+    command = json.dumps({'action': 'toggle_window_frame'})
+    response = send_command(command)
+    ui.notify(f'Toggle window frame response: {response}')
+
 # %% ---- 2025-02-10 ------------------------
 # Play ground
 # NiceGUI UI
 
-with ui.card():
-    ui.label('SSVEP Keyboard Control Panel')
 
-    ui.number(label='Number of Columns', value=6, min=3, max=10,
-              on_change=lambda e: set_num_columns(e.value))
+with ui.row():
+    with ui.card():
+        ui.label('SSVEP Keyboard Control Panel')
 
-    cue_input = ui.input(label='Cue Sequence')
-    ui.button('Append Cue Sequence',
-              on_click=lambda: append_cue_sequence(cue_input.value))
+        ui.number(label='Number of Columns', value=6, min=3, max=10,
+                  on_change=lambda e: set_num_columns(e.value))
+
+        cue_input = ui.input(label='Cue Sequence')
+        append_cue_button = ui.button('Append Cue Sequence')
+
+    with ui.card():
+        ui.label('SSVEP Keyboard Input Results')
+
+        input_textarea = ui.textarea(
+            label='Text', placeholder='start typing',
+            on_change=lambda e: result.set_text('you typed: ' + e.value))
+        result = ui.label()
+
+        ui.button('Submit Inputs',
+                  on_click=toggle_window_frame)
 
 
 class DetailCard:
@@ -98,6 +120,8 @@ class DetailCard:
         command = json.dumps({'action': 'get_input_buffer'})
         response = json.loads(send_command(command))
         self.input_buffer_label.set_text(f'Input Buffer: {response}')
+        input_buffer = response.get('input_buffer', '')
+        input_textarea.set_value(''.join(input_buffer))
 
         # Update the current_cue segment.
         command = json.dumps({'action': 'get_current_cue'})
@@ -119,6 +143,13 @@ class DetailCard:
 
 dc = DetailCard()
 
+
+def append_cue_button_on_click():
+    append_cue_sequence(cue_input.value)
+    dc.update_status()
+
+
+append_cue_button.on('click', append_cue_button_on_click)
 
 ui.timer(interval=1.0, callback=dc.update_status)
 

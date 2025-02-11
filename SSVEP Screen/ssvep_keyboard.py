@@ -31,7 +31,7 @@ from PIL import Image, ImageDraw, ImageFont
 from PIL.ImageQt import ImageQt
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QPixmap
+from PyQt6.QtGui import QPixmap, QPainter, QColor
 from PyQt6.QtWidgets import QMainWindow, QApplication, QLabel
 from keyboard_layout import MyKeyboard
 
@@ -141,10 +141,24 @@ class SSVEPScreenLayout:
         return layout
 
 
+class CustomizedQMainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+
+    def has_frame(self):
+        ''' Tell if the window has a frame.
+
+        :return: True if the window has a frame, False otherwise.
+        '''
+        if self.windowFlags() & Qt.WindowType.FramelessWindowHint:
+            return False
+        return True
+
+
 class QtComponents:
     # Components
     qapp = qapp
-    window = QMainWindow()
+    window = CustomizedQMainWindow()  # QMainWindow()
     pixmap_container = QLabel(window)
     width = CONFIG.SSVEPScreen.width  # None
     height = CONFIG.SSVEPScreen.height  # None
@@ -169,11 +183,12 @@ class QtComponents:
 
         # Disable frame and keep the window on the top layer
         # It is necessary to set the FramelessWindowHint for the WA_TranslucentBackground works
-        # self.window.setWindowFlags(Qt.WindowType.FramelessWindowHint |
-        #                            Qt.WindowType.WindowStaysOnTopHint)
+        self.window.setWindowFlags(Qt.WindowType.FramelessWindowHint |
+                                   Qt.WindowType.WindowStaysOnTopHint)
 
-        # Only hide window frame
-        # self.window.setWindowFlags(Qt.WindowType.FramelessWindowHint)
+        # Set overall opacity.
+        overall_opacity = 1.0
+        self.window.setWindowOpacity(overall_opacity)
 
         # Fetch the screen size and set the size for the window
         screen = self.qapp.primaryScreen()
@@ -191,8 +206,6 @@ class QtComponents:
         # Set the pixmap_container accordingly,
         # and it is within the window bounds
         self.pixmap_container.setGeometry(0, 0, self.width, self.height)
-
-        self.window.setWindowFlags(Qt.WindowType.WindowStaysOnTopHint)
 
         logger.debug(
             f'Reset window size to {self.width}, {self.width}, and reset other stuff')
@@ -242,7 +255,7 @@ class SSVEPScreenPainter(AdditionalFunctions, SSVEPFrequency):
     def reset_img(self):
         '''Reset the image object.'''
         # Generate fully transparent image and its drawer
-        mat = np.zeros((self.width, self.height, 4), dtype=np.uint8)
+        mat = np.zeros((self.height, self.width, 4), dtype=np.uint8)
         mat += 100
         self.img = Image.fromarray(mat).convert('RGBA')
         self.img_drawer = ImageDraw.Draw(self.img)
@@ -399,17 +412,24 @@ class SSVEPScreenPainter(AdditionalFunctions, SSVEPFrequency):
             seconds_in_trial = tr * change_char_step
 
             with self.rlock:
-                # Clear only the text area before drawing new text
+                # Clear only the text area before drawing new text.
                 self.img_drawer.rectangle(
                     (0, 0, self.width, self.header_height), fill=(0, 0, 0, 0))
 
+                # Draw the time issue.
                 self.img_drawer.text(
-                    (0, self.header_height/2), f'{z:.2f} | {seconds_in_trial:.2f}', font=large_font, anchor='lt')
+                    (self.width, 0), f'{z:.2f} | {seconds_in_trial:.2f}',
+                    font=small_font, anchor='rt')
+
+                # Draw the current input.
+                self.img_drawer.text(
+                    (0, self.header_height//2), ''.join(self.mkb.input_buffer),
+                    font=large_font, anchor='lt')
 
                 # Draw the progressing bar.
                 self.img_drawer.rectangle((0, self.header_height-2, self.width, self.header_height),
                                           fill=(150, 150, 150, 0))
-                self.img_drawer.rectangle((0, self.header_height-2, (1-tr)*self.width, self.header_height),
+                self.img_drawer.rectangle((0, self.header_height-2, (1-tr) * self.width, self.header_height),
                                           fill=(150, 150, 150, 150))
 
                 # Draw the patch.
