@@ -7,6 +7,27 @@ Copyright & Email: chuncheng.zhang@ia.ac.cn
 Purpose:
     The screen display for SSVEP keyboard.
 
+Decoding process and communication:
+
+    1. The SSVEP trial starts.
+    2. Write the decoding request as 
+        content = json.dumps({
+            'action': 'SSVEP trial starts.',
+            'cue': cue_patch['_char'],
+            'cueOmega': cue_patch['_omega']
+        })
+    3. Wrap the content into letter.
+        3.1. Send the letter.
+        3.2. Insert the letter to the pending bag.
+    4. Wait for decoding in 5 seconds.
+        4.1 If received decoding results on time,
+            mark the decoding result into SSVEP patches,
+            and archive the letter and result letter into finish bag.
+        4.2 If not received decoding results on time,
+            and archive the letter into failed bag.
+
+    The received letter's content should have 'decodedOmega' attribute.
+
 Functions:
     1. Requirements and constants
     2. Function and class
@@ -81,9 +102,11 @@ class MyClient(BaseClientSocket):
 
         # Wait for the receiving letter which I have sent.
         if lt := self.mm.bag_pending.fetch_letter(letter['uid']):
-            lt.updata({'_finished_at': time.time()})
+            lt.update({'_finished_at': time.time()})
             c2 = json.loads(letter['content'])
             self.queue.put_nowait(c2['decodedOmega'])
+            self.mm.bag_finished.insert_letter(letter)
+            self.mm.bag_finished.insert_letter(lt)
 
 
 # Socket client
@@ -360,10 +383,10 @@ class SSVEPScreenPainter(AdditionalFunctions, SSVEPFrequency):
             return self.img
 
     def wait_for_decoding(self, letter: dict):
-        # Wait for 4 seconds at most.
+        # Wait for 5 seconds at most.
         # If not received, mark as expired failing.
         try:
-            decoded_omega = client.queue.get(timeout=4)
+            decoded_omega = client.queue.get(timeout=5)
         except Exception as err:
             if lt := client.mm.bag_pending.fetch_letter(letter['uid']):
                 lt.update({'_fail_reason': f'{type(err)}({err})'})
@@ -371,8 +394,8 @@ class SSVEPScreenPainter(AdditionalFunctions, SSVEPFrequency):
             return
 
         # Got results, write it into every patch.
-        for k, v in self.current_layout.items():
-            v['__decoded_omega'] = decoded_omega
+        for patch in self.current_layout:
+            patch['__decoded_omega'] = decoded_omega
         return
 
     def main_loop(self):
@@ -389,7 +412,7 @@ class SSVEPScreenPainter(AdditionalFunctions, SSVEPFrequency):
         # The flipping rate is slower when the speed_factor is lower.
         speed_factor = 1
         # speed_factor = 0.5
-        change_char_step = 6  # seconds
+        change_char_step = 7  # seconds
         change_char_next_passed = change_char_step
 
         def setup_trial():
@@ -418,21 +441,25 @@ class SSVEPScreenPainter(AdditionalFunctions, SSVEPFrequency):
             self.current_layout = layout
             self.current_cue = (cue, cue_idx)
 
+            content = {
+                'action': 'SSVEP trial starts.',
+                'cue': None,
+                'cueOmega': None
+            }
             if cue_idx:
                 cue_patch = layout[cue_idx]
-                content = json.dumps({
-                    'action': 'SSVEP trial starts.',
+                content.update({
                     'cue': cue_patch['_char'],
                     'cueOmega': cue_patch['_omega']
                 })
-                letter = client.mm.mk_letter(
-                    src=client.path_uid, dst='/eeg/monitor', content=content)
-                client.send_message(json.dumps(letter))
-                client.mm.bag_pending.insert_letter(letter)
-                Thread(target=self.wait_for_decoding,
-                       args=(letter,), daemon=True).start()
-            else:
-                pass
+            content = json.dumps(content)
+            letter = client.mm.mk_letter(
+                src=client.path_uid, dst='/eeg/monitor', content=content)
+            print(json.loads(content))
+            client.send_message(json.dumps(letter))
+            client.mm.bag_pending.insert_letter(letter)
+            Thread(target=self.wait_for_decoding,
+                   args=(letter,), daemon=True).start()
 
             return layout, cue, cue_idx
 
@@ -534,7 +561,7 @@ class SSVEPScreenPainter(AdditionalFunctions, SSVEPFrequency):
                     # Draw the decoded frame.
                     if omega == decoded_omega:
                         self.img_drawer.rectangle(
-                            (x-1, y-1, x+sz+1, y+sz+1), outline='green', width=3)
+                            (x-1, y-1, x+sz+1, y+sz+1), outline='green', width=7)
 
             # Blink on the right top corner in 50x50 pixels size if not focused
             if False and not self.flag_has_focus:
@@ -557,6 +584,7 @@ class SSVEPScreenPainter(AdditionalFunctions, SSVEPFrequency):
 
 
 class ResponseStatus(Enum):
+    '''Response to the NiceGUI'''
     # Everything is fine.
     OK = 'OK'
     # Message is good, but can not operate properly.

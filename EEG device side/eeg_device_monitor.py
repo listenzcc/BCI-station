@@ -9,7 +9,7 @@ from threading import Thread
 from matplotlib import pyplot as plt
 from matplotlib.animation import FuncAnimation
 
-from sync.routine_center.client_base import BaseClientSocket, MailMan
+from sync.routine_center.client_base import BaseClientSocket
 from eeg_device_reader_ssvep_simulation import EEGDeviceReader, convert_data_into_array
 
 # Init the plt with bmh
@@ -38,7 +38,6 @@ class Decoder(object):
 
 
 decoder = Decoder()
-mm = MailMan('eeg-device-monitor-1')
 
 
 class SocketClient(BaseClientSocket):
@@ -54,72 +53,97 @@ class SocketClient(BaseClientSocket):
         # Recover the letter.
         letter = json.loads(message)
 
-        # Mark the letter as received by this.
-        mm.recv_letter(letter, self.path_uid)
-
         # Deal with content
-        content = letter['content']
-        if content.startswith('SSVEP-chunk-start,'):
-            display_freq = float(content.split(',')[1])
+        content = json.loads(letter['content'])
+        action = content.get('action')
+        cue = content.get('cue')
+        cueOmega = content.get('cueOmega')
+
+        # Only response with the SSVEP trial starts. action.
+        if action == 'SSVEP trial starts.':
+            # I am processing the letter.
+            self.mm.bag_pending.insert_letter(letter)
             onstart_time = letter['_timestamp']
 
             # If using simulation device, insert the chunk for SSVEP simulation
-            if self.use_ssvep_simulation_reader:
-                eeg_device_reader.fill_ssvep_chunk_data(display_freq)
+            if self.use_ssvep_simulation_reader and cueOmega is not None:
+                eeg_device_reader.fill_ssvep_chunk_data(cueOmega)
 
             # Wait a while for decoding
-            Thread(target=self.wait_for_data, args=(
-                onstart_time, display_freq, letter), daemon=True).start()
+            Thread(target=self.wait_for_data,
+                   args=(onstart_time, cueOmega, letter), daemon=True).start()
+
+        # Mark the letter as failure.
+        else:
+            letter.update({'_fail_reason': 'Unknown action'})
+            self.mm.bag_failed.insert(letter)
 
         return
 
-    def wait_for_data(self, onstart_time, display_freq, letter):
-        mm.insert_pending_letter(letter)
-        # Decoding setup.
-        data_length_required = 4  # seconds
-        package_interval = eeg_device_reader.package_interval
-        time_resolution = eeg_device_reader.time_resolution
+    def wait_for_data(self, onstart_time, cueOmega, letter):
+        try:
+            # Decoding setup.
+            data_length_required = 4  # seconds
+            package_interval = eeg_device_reader.package_interval
+            time_resolution = eeg_device_reader.time_resolution
 
-        # Get data after required length seconds.
-        time.sleep(data_length_required)
-        while True:
-            data = eeg_device_reader.peek_latest_data_by_seconds(
-                data_length_required)
+            # Get data after required length seconds.
+            time.sleep(data_length_required)
+            while True:
+                data = eeg_device_reader.peek_latest_data_by_seconds(
+                    data_length_required)
 
-            # Break if already got enough data.
-            # If failed, sleep until the next package arrival.
-            t = data[-1][1]
-            if t > onstart_time + data_length_required + package_interval:
-                break
+                # Break if already got enough data.
+                # If failed, sleep until the next package arrival.
+                t = data[-1][1]
+                if t > onstart_time + data_length_required + package_interval:
+                    break
+                else:
+                    time.sleep(package_interval)
+
+            # Deal with the data
+            data, times = convert_data_into_array(
+                data, package_interval, time_resolution)
+
+            data = data[times >= onstart_time]
+            times = times[times >= onstart_time]
+
+            pred_freq = decoder.predict(data)
+            pred_freq = float(pred_freq[0])
+
+            print(pred_freq, cueOmega)
+
+            # Send back the decoding result.
+            letter['dst'] = letter['src']
+            letter['src'] = self.path_uid
+            content = json.loads(letter['content'])
+
+            # ! I am pretending process the decoding.
+            # Here, I am just adding a random omega for demonstration if the cueOmega is not given.
+            # In real-world scenario, you should replace this with your decoding process.
+            content.update({'decodedOmega': np.random.uniform(5, 30)})
+            if omega := content.get('cueOmega'):
+                content.update({'decodedOmega': omega})
             else:
-                time.sleep(package_interval)
+                available_omega = np.linspace(5, 30, 26)
+                np.random.shuffle(available_omega)
+                content.update({'decodedOmega': available_omega[0]})
+            letter['content'] = json.dumps(content)
 
-        # Deal with the data
-        data, times = convert_data_into_array(
-            data, package_interval, time_resolution)
+            self.send_message(json.dumps(letter))
 
-        data = data[times >= onstart_time]
-        times = times[times >= onstart_time]
-
-        pred_freq = decoder.predict(data)
-        pred_freq = float(pred_freq[0])
-
-        print(pred_freq, display_freq)
-
-        # Send back the decoding result.
-        letter['dst'] = letter['src']
-        letter['src'] = self.path_uid
-        letter['content'] += f',{pred_freq}'
-
-        self.send_message(json.dumps(letter))
-
-        mm.remove_pending_letter(letter['uid'])
-        mm.archive_finished_letter(letter)
+            # Mark the letter as finished.
+            if lt := self.mm.bag_pending.fetch_letter(letter['uid']):
+                self.mm.bag_finished.insert_letter(lt)
+                self.mm.bag_finished.insert_letter(letter)
+        except Exception as err:
+            if lt := self.mm.bag_pending.fetch_letter(letter['uid']):
+                lt.update({'_fail_reason': f'{type(err)}({err})'})
+                self.mm.bag_failed.insert_letter(lt)
         return
 
 
-client = SocketClient('192.168.137.1')
-# client = SocketClient()
+client = SocketClient()
 client.connect()
 
 
@@ -294,8 +318,7 @@ if __name__ == "__main__":
     #     mm.root.after(100, check_plot_closed)
 
     # mm.root.after(100, check_plot_closed)
-    plt.show(block=False)
-    mm.root.mainloop()
+    plt.show(block=True)
     print('--')
 
     audio_stream.close()
