@@ -373,6 +373,7 @@ class BaseClientSocket:
         self.send_initial_info()
         self.keep_receiving()
         self.keep_alive()
+        time.sleep(1)
 
     def close(self):
         '''Close the socket.'''
@@ -421,7 +422,7 @@ class BaseClientSocket:
         elif message.startswith('AcquireBags'):
             for name, bag in self.mm.bags.items():
                 if name in message:
-                    print(f'Acquired bag: {name}')
+                    # print(f'Acquired bag: {name}')
                     self.send_message(name + ':' + bag.dumps())
 
         # Handle other messages.

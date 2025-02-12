@@ -22,11 +22,6 @@ class MyBag(dict):
             self._rlock.release()
 
     def dumps(self):
-        try:
-            json.dumps(self)
-        except Exception as e:
-            print(self)
-
         with self.freeze_bag():
             return json.dumps(self)
 
@@ -378,6 +373,7 @@ class BaseClientSocket:
         self.send_initial_info()
         self.keep_receiving()
         self.keep_alive()
+        time.sleep(1)
 
     def close(self):
         '''Close the socket.'''
