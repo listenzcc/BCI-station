@@ -17,26 +17,30 @@ Functions:
 
 # %% ---- 2025-02-08 ------------------------
 # Requirements and constants
-from omegaconf import OmegaConf
-import time
-from timer import RunningTimer
 import sys
+import json
+import time
+import socket
 import itertools
 import numpy as np
+
 from enum import Enum
+from queue import Queue
 from loguru import logger
+from timer import RunningTimer
+from omegaconf import OmegaConf
 from threading import Thread, RLock
 
 from PIL import Image, ImageDraw, ImageFont
 from PIL.ImageQt import ImageQt
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QPixmap, QPainter, QColor
+from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import QMainWindow, QApplication, QLabel
-from keyboard_layout import MyKeyboard
 
-import socket
-import json
+from keyboard_layout import MyKeyboard
+from sync.routine_center.client_base import BaseClientSocket
+
 
 # Initialize the QApplication in the first place.
 qapp = QApplication(sys.argv)
@@ -57,6 +61,34 @@ class SSVEPInputState(Enum):
     freedomInput = '自由输入'
     cuedInput = '指定输入'
     outputSelection = '输出选择'
+
+
+class MyClient(BaseClientSocket):
+    path = '/client/ssvepKeyboard'
+    uid = 'ssvep-keyboard-1'
+    queue = Queue(10)
+
+    def __init__(self, host=None, port=None, timeout=None):
+        super().__init__(**dict(host=host, port=port, timeout=timeout))
+        logger.info(f'Initializing client: {self.path_uid}')
+        pass
+
+    def handle_message(self, message):
+        super().handle_message(message)
+        letter = json.loads(message)
+        # Stamp the letter
+        letter['_stations'].append((self.path_uid, time.time()))
+
+        # Wait for the receiving letter which I have sent.
+        if lt := self.mm.bag_pending.fetch_letter(letter['uid']):
+            lt.updata({'_finished_at': time.time()})
+            c2 = json.loads(letter['content'])
+            self.queue.put_nowait(c2['decodedOmega'])
+
+
+# Socket client
+client = MyClient()
+client.connect()
 
 
 class SSVEPFrequency:
@@ -327,6 +359,22 @@ class SSVEPScreenPainter(AdditionalFunctions, SSVEPFrequency):
         with self.rlock:
             return self.img
 
+    def wait_for_decoding(self, letter: dict):
+        # Wait for 4 seconds at most.
+        # If not received, mark as expired failing.
+        try:
+            decoded_omega = client.queue.get(timeout=4)
+        except Exception as err:
+            if lt := client.mm.bag_pending.fetch_letter(letter['uid']):
+                lt.update({'_fail_reason': f'{type(err)}({err})'})
+                client.mm.bag_failed.insert_letter(lt)
+            return
+
+        # Got results, write it into every patch.
+        for k, v in self.current_layout.items():
+            v['__decoded_omega'] = decoded_omega
+        return
+
     def main_loop(self):
         ''' Main loop for SSVEP display. '''
 
@@ -364,11 +412,27 @@ class SSVEPScreenPainter(AdditionalFunctions, SSVEPFrequency):
                     '_cue_flag': i == cue_idx,
                     '_omega': omega,
                     '_phase': phase,
-                    '__decoded': None
+                    '__decoded_omega': None
                 })
 
             self.current_layout = layout
             self.current_cue = (cue, cue_idx)
+
+            if cue_idx:
+                cue_patch = layout[cue_idx]
+                content = json.dumps({
+                    'action': 'SSVEP trial starts.',
+                    'cue': cue_patch['_char'],
+                    'cueOmega': cue_patch['_omega']
+                })
+                letter = client.mm.mk_letter(
+                    src=client.path_uid, dst='/eeg/monitor', content=content)
+                client.send_message(json.dumps(letter))
+                client.mm.bag_pending.insert_letter(letter)
+                Thread(target=self.wait_for_decoding,
+                       args=(letter,), daemon=True).start()
+            else:
+                pass
 
             return layout, cue, cue_idx
 
@@ -442,7 +506,7 @@ class SSVEPScreenPainter(AdditionalFunctions, SSVEPFrequency):
                     omega = patch['_omega']
                     phase = patch['_phase']
                     cue_flag = patch['_cue_flag']
-                    decoded = patch['__decoded']
+                    decoded_omega = patch['__decoded_omega']
 
                     # Draw the patch.
                     # Compute omega and phase.
@@ -468,7 +532,7 @@ class SSVEPScreenPainter(AdditionalFunctions, SSVEPFrequency):
                         patch['__decoded'] = omega
 
                     # Draw the decoded frame.
-                    if omega == decoded:
+                    if omega == decoded_omega:
                         self.img_drawer.rectangle(
                             (x-1, y-1, x+sz+1, y+sz+1), outline='green', width=3)
 

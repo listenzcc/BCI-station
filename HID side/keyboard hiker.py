@@ -31,14 +31,12 @@ from threading import Thread
 from loguru import logger
 from rich import print, inspect
 
-from sync.routine_center.client_base import BaseClientSocket, MailMan
+from sync.routine_center.client_base import BaseClientSocket
 
 logger.add('log/keyboard hiker.log', rotation='5 MB')
 
 # %% ---- 2024-11-15 ------------------------
 # Function and class
-
-mm = MailMan('keyboard-hiker-1')
 
 
 class MyClient(BaseClientSocket):
@@ -53,15 +51,18 @@ class MyClient(BaseClientSocket):
     def handle_message(self, message):
         super().handle_message(message)
         letter = json.loads(message)
-        if mm.retrieve_letter_in_waiting(letter['uid']):
-            mm.archive_finished_letter(letter)
-            logger.info(f'Finished: {letter}')
-        else:
-            logger.warning(f'Failed: {letter}')
+        # Stamp the letter.
+        letter['_stations'].append((self.path_uid, time.time()))
+        # Mark the letter as finished.
+        if lt := self.mm.bag_pending.fetch_letter(letter['uid']):
+            lt.update({'_finished_at': time.time()})
+            self.mm.bag_finished.insert_letter(letter)
+            self.mm.bag_finished.insert_letter(lt)
+        return
 
 
 # Socket client
-client = MyClient(host='localhost')
+client = MyClient()
 client.connect()
 
 
@@ -177,22 +178,21 @@ class KeyboardHiker(object):
         logger.debug(f'Got key press: {event}, {event.time}')
 
         # Send ssvep_chunk_start event to the /eeg/monitor
-        content = f'Event: {event}'
+        content = f'Keyboard event: {event}'
         dst = '/client/simulationWorkload'
-        content = 'SSVEP-chunk-start,3.14'
-        dst = '/eeg/monitor'
-        letter = mm.mk_letter(
+        letter = client.mm.mk_letter(
             src=client.path_uid, dst=dst, content=content)
         client.send_message(json.dumps(letter))
-        mm.archive_await_letter(letter)
+        client.mm.bag_pending.insert_letter(letter)
         Thread(target=mark_as_expired, args=(
             letter['uid'],), daemon=True).start()
 
 
 def mark_as_expired(uid):
     time.sleep(5)
-    letter = mm.mark_expired_letter_with_uid(uid)
-    if letter:
+    if letter := client.mm.bag_pending.fetch_letter(uid):
+        letter.update({'_fail_reason': 'Expired'})
+        client.mm.bag_failed.insert_letter(letter)
         logger.error(f'Expired: {letter}')
 
 

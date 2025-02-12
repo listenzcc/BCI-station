@@ -2,6 +2,7 @@
 import time
 import json
 import socket
+import contextlib
 import pandas as pd
 
 from enum import Enum
@@ -17,15 +18,20 @@ from tqdm.auto import tqdm
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
+from client_base import MailMan
+
 logger.add('log/BCI station control center.log', rotation='5 MB')
 
 # %%
 
+mm = MailMan()
+
 
 class ClientStatus(Enum):
-    Connecting = 1
-    Connected = 2
-    Disconnected = 3
+    Initialized = 'Initialized, but not used.'
+    Connecting = 'Connecting, time correction is processing.'
+    Connected = 'Established, everything is fine.'
+    Disconnected = 'Has been disconnected.'
 
 
 @dataclass(slots=False)
@@ -40,16 +46,61 @@ class IncomingClient:
     netRemoteTime: float = 0
     netLocalTime: float = 0
     # Status of the client
-    status: ClientStatus = ClientStatus.Connecting
+    status: ClientStatus = None  # ClientStatus.Initialized
     # Message queue
-    queue: Queue = Queue(1000)
+    message_queue: Queue = None  # Queue(1000)
+    # Echo data
+    echo_data: list = None  # []
+    # Bags
+    bags: dict = None  # {k: None for k in mm.bags}
 
-    def __init__(self, **kwargs):
-        self.update(**kwargs)
+    def __init__(self):
+        self.bags = {k: None for k in mm.bags}
+        self.message_queue = Queue(1000)
+        self.status = ClientStatus.Initialized
+        self.echo_data = []
 
     def update(self, **kwargs):
+        '''
+        Update the attributes of the client.
+
+        :param kwargs: The dictionary of the key/value pairs.
+
+        :return: The IncomingClient object.
+        '''
         for k, v in kwargs.items():
             self.__setattr__(k, v)
+        return self
+
+    def estimate_connection_quality(self):
+        '''
+        Estimate connection quality.
+
+        The echo_data or connection quality table has 3 columns:
+
+        1. t1, the local sending time.
+        2. t2, the remote time.
+        3. t3, the local receiving time.
+
+        The connection quality attributes of netDelay, netRemoteTime and netLocalTime are updated according to the table.
+
+        :return: Connection quality table.
+        '''
+        df = pd.DataFrame(self.echo_data)
+        df['delay'] = df['t3'] - df['t1']
+        df['tServer'] = (df['t3'] + df['t1']) / 2
+        df['tClient'] = df['t2']
+        df = df.sort_values(by='delay', ascending=True)
+
+        # Update the connection quality attributes by the lowest delay record.
+        connection_quality = dict(
+            netDelay=float(df.iloc[0]['delay']),
+            netRemoteTime=float(df.iloc[0]['tClient']) +
+            float(df.iloc[0]['delay'])/2,
+            netLocalTime=float(df.iloc[0]['tServer'])
+        )
+        self.update(**connection_quality)
+        return df
 
 
 class ControlCenter:
@@ -58,8 +109,6 @@ class ControlCenter:
     valid_key = b'12345678'
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     incoming_clients = {}
-    echo_data = []
-    message_queue = Queue(100)
 
     def __init__(self, host=None, port=None, valid_key=None):
         if host:
@@ -87,9 +136,9 @@ class ControlCenter:
 
     def handle_client(self, client_socket, client_address):
         """Handle communication with a connected client."""
+        # Receive the hello message from the client.
+        # Read the advanced key code (8 bytes) for identifying the legal client.
         try:
-            # Receive the hello message from the client.
-            # Read the advanced key code (8 bytes) for identifying the legal client.
             key_code = client_socket.recv(8)
             if key_code != self.valid_key:
                 logger.warning(
@@ -132,85 +181,101 @@ class ControlCenter:
                 'path': client_path,
                 'uid': client_uid,
             })
-            self.incoming_clients[client_address] = ic
 
             ic.status = ClientStatus.Connecting
 
             # Echo package chunk.
-            self.send_echo_packages(client_socket, client_address)
+            self.exchange_echo_packages(ic)
 
             ic.status = ClientStatus.Connected
 
-            self.update_gui()
+            self.incoming_clients[client_address] = ic
+            logger.info(f'Client comes: {ic}')
+        except Exception as err:
+            logger.error('Error occurred during connecting.')
+            raise err
 
-            logger.info(
-                f'Client {self.incoming_clients[client_address]} comes.')
-
-            # Keep listening for the messages from the client.
-            while True:
-                # Receive the header
-                # The header is message length
-                message_length = client_socket.recv(8)
-                # Break out if message_length is null
-                if not message_length:
-                    break
-                message_length = int.from_bytes(
-                    message_length, byteorder='big')
-
-                # Receive the message body on message_length.
-                message = b""
-                while len(message) < message_length:
-                    chunk = client_socket.recv(
-                        min(message_length - len(message), 1024))
-                    if not chunk:
-                        break
-                    message += chunk
-
-                # Not allow the empty message body.
-                assert message, "Empty message is not allowed."
-
-                message = message.decode()
-                logger.debug(
-                    f"Received message: {message[:20]} ({len(message)} bytes)")
-
-                self.handle_message(message, client_address)
-
-                try:
-                    ic.queue.put_nowait(message)
-                except queue.Full:
-                    logger.warning('Message queue is full.')
-
-                # The next while loop.
-                continue
-
+        # Now I have the legal IncomingClient.
+        try:
+            self._handle_client_message_loop(ic)
         except (ConnectionResetError, ConnectionAbortedError, AssertionError) as err:
             logger.error(f'Occurred: {err}')
-
         finally:
             client_socket.close()
-            self.incoming_clients[client_address].status = ClientStatus.Disconnected
-            self.update_gui()
-            self.update_latest_message(
-                client_address, f"{client_path} ({client_uid}) disconnected")
+            ic.status = ClientStatus.Disconnected
+        return
 
-    def handle_message(self, message, client_address):
-        sic: IncomingClient = self.incoming_clients[client_address]
+    def _handle_client_message_loop(self, ic: IncomingClient):
+        # Keep listening for the messages from the client.
+        while True:
+            # Receive the header
+            # The header is message length
+            message_length = ic.socket.recv(8)
+            # Break out if message_length is null
+            if not message_length:
+                break
+            message_length = int.from_bytes(
+                message_length, byteorder='big')
 
+            # Receive the message body on message_length.
+            message = b""
+            while len(message) < message_length:
+                chunk = ic.socket.recv(
+                    min(message_length - len(message), 1024))
+                if not chunk:
+                    break
+                message += chunk
+
+            # Not allow the empty message body.
+            assert message, "Empty message is not allowed."
+
+            message = message.decode()
+            logger.debug(
+                f"Received message: {message[:20]} ({len(message)} bytes)")
+
+            self.handle_message(message, ic)
+
+            try:
+                ic.message_queue.put_nowait(message)
+            except queue.Full:
+                logger.warning('Message queue is full.')
+
+            # The next while loop.
+            continue
+
+    def handle_message(self, message: str, sic: IncomingClient):
         # TODO: Handle the message from the client
+        # Handle the bags message.
+        # It aligns with the MailMan's bag.
+        for bag_name in sic.bags.keys():
+            if message.startswith(bag_name):
+                content = message
+                # content = message.split(':', 1)[1]
+                # content = json.loads(content)
+                sic.bags.update(
+                    {bag_name: f'{sic.address}-{sic.path}-{sic.uid}'+content})
+                return message
+
+        # Handle echo package.
         if message.startswith("Echo"):
-            # Handle echo package
             # Handle the echo package AFTER the connection has been established.
             # It is used to sync the client during the workflow.
             parts = message.split(',')
             t1 = float(parts[1])
             t2 = float(parts[2])
             t3 = time.time()
-            self.echo_data.append({'t1': t1, 't2': t2, 't3': t3})
+            sic.echo_data.append({'t1': t1, 't2': t2, 't3': t3})
             logger.debug('Received echo message.')
+
+        # Handle keep-alive package.
         elif message.startswith("Keep-Alive"):
-            # Handle keep-alive package.
+            # Request bag information.
+            for key in mm.bags.keys():
+                self.send_message(sic.socket, f'AcquireBags-{key}')
             # Not doing anything.
             pass
+
+        # Handle other json package.
         elif message.startswith("{"):
             # The incoming message is the json object
             raw_letter = json.loads(message)
@@ -238,7 +303,7 @@ class ControlCenter:
                     # Translate local time into dst time
                     t = t - dic.netLocalTime + dic.netRemoteTime
                     letter['_timestamp'] = t
-                    self.send_message(dic['socket'], json.dumps(letter))
+                    self.send_message(dic.socket, json.dumps(letter))
                     logger.info(f'Translated {letter} to {dic.address}')
                     count += 1
 
@@ -246,39 +311,25 @@ class ControlCenter:
             if count == 0:
                 logger.warning(f'Received {raw_letter}, but did not deliver.')
         else:
-            logger.warning(f'Can not handle message: {message}')
+            logger.error(f'Can not handle message: {message}')
 
         # Update the latest message.
-        self.update_latest_message(client_address, message)
+        self.update_latest_message(sic, message)
 
         return message
 
-    def send_echo_packages(self, client_socket, client_address):
+    def exchange_echo_packages(self, ic: IncomingClient):
         """
         Send and receive a chunk of echo packages.
 
         Attention, this methods duplicates 20 talks to prevent random delay occasionally.
         There are 10 ms gaps between talks, so it costs about 0.2 seconds to finish.
         """
-        echo_data = []
         for _ in tqdm(range(20), 'Echo'):
-            self.send_echo_package(client_socket)
-            self.receive_echo_response(client_socket, echo_data)
+            self.send_echo_package(ic.socket)
+            self.receive_echo_response(ic.socket, ic.echo_data)
             time.sleep(0.01)
-        df = pd.DataFrame(echo_data)
-        df['delay'] = df['t3'] - df['t1']
-        df['tServer'] = (df['t3'] + df['t1']) / 2
-        df['tClient'] = df['t2']
-        df = df.sort_values(by='delay', ascending=True)
-
-        connection_quality = dict(
-            netDelay=float(df.iloc[0]['delay']),
-            netRemoteTime=float(df.iloc[0]['tClient']) +
-            float(df.iloc[0]['delay'])/2,
-            netLocalTime=float(df.iloc[0]['tServer'])
-        )
-        self.incoming_clients[client_address].update(**connection_quality)
-        return df
+        return ic.estimate_connection_quality()
 
     def send_echo_package(self, client_socket):
         """
@@ -334,16 +385,16 @@ class ControlCenter:
 
     def send_message(self, client_socket, message: str):
         """Send a message to the client."""
+        if client_socket is None:
+            return
         message_bytes = message.encode()
         message_length = len(message_bytes).to_bytes(8, byteorder='big')
         client_socket.sendall(message_length + message_bytes)
         logger.debug(f"Sent message: {message[:20]} ({len(message)} bytes)")
+        return
 
-    def update_latest_message(self, client_address, message: str, meaningful_message: bool = True):
+    def update_latest_message(self, ic: IncomingClient, message: str):
         """Update the latest message of the client."""
-        client_info = self.incoming_clients.get(client_address)
-
-    def update_gui(self):
         pass
 
     def close_server(self):
@@ -353,8 +404,6 @@ class ControlCenter:
             logger.info(f'Client {client_info} closed.')
         self.server_socket.close()
         logger.info('Sever socked closed.')
-        self.gui.quit()
-        logger.info(f'TK gui quit.')
 
     def run(self):
         """Run the control center."""
@@ -363,13 +412,16 @@ class ControlCenter:
 
 # %%
 homepage = ui.card()
+with homepage:
+    ui.label('Hello there!')
+    ui.label('I am the Routine Center.')
 
 # control_center = ControlCenter(host='192.168.137.1')
 control_center = ControlCenter()
 
 
 class NiceGuiManager(object):
-    pages: dict = defaultdict(dict)
+    pages_container: dict = defaultdict(dict)
     tabs = ui.tabs().classes('w-full')
     cc = control_center
     thread_book = {}
@@ -392,43 +444,73 @@ class NiceGuiManager(object):
         message_log.push('Log rolling thread stopped.')
 
     def timer_callback(self):
-        print('')
-        print(f'Timer callback at {time.time()}')
-        # print('clients', self.cc.incoming_clients)
-        # print('pages', self.pages)
+        '''
+        Timer callback, running for every 1 second.
+        Update the page.
+        '''
+        # print('')
+        # print(f'Timer callback at {time.time()}')
         for _, ic in self.cc.incoming_clients.items():
             ic: IncomingClient = ic
-            thread_name = ic.address
 
-            if ic.status is ClientStatus.Disconnected and thread_name in self.thread_book:
-                self.thread_book.pop(ic.address)
+            # On the ic is disconnected.
+            # 1. remove it from the thread_book, stop update info.
+            # 2. Remove the page and panel.
+            # 3. Remove from pages_container.
+            if ic.status is ClientStatus.Disconnected:
+                with contextlib.suppress(Exception):
+                    self.thread_book.pop(ic.address)
+
+                if pc := self.pages_container[ic.address]:
+                    page = pc['page']
+                    tab_panel = pc['tab_panel']
+                    self.tabs.remove(page)
+                    self.tabs.remove(tab_panel)
+
+                with contextlib.suppress(Exception):
+                    self.pages_container.pop(ic.address)
+
+                continue
 
             # If already has the page.
             # TODO: Update the page.
-            if ic.address in self.pages:
-                dct = self.pages[ic.address]
+            if dct := self.pages_container.get(ic.address):
+                dct['path_label'].text = f'Path: {ic.path}?{ic.uid} {time.ctime()}'
                 dct['status_label'].text = f'Status: {ic.status}'
-                dct['quality_label'].text = f"Delay: {ic.netDelay:.4f} | Offset: {
-                    ic.netRemoteTime - ic.netLocalTime:.4f}"
+                offset = ic.netRemoteTime - ic.netLocalTime
+                dct['quality_label'].text = f"Delay: {ic.netDelay:.4f} | Offset: {offset:.4f}"
 
+                # Alive spinner.
                 if ic.status is ClientStatus.Disconnected:
                     dct['spinner'].set_visibility(False)
+
+                # Update bags.
+                for k, v in ic.bags.items():
+                    dct['bags'][k].value = v
 
                 continue
 
             # Create the new page.
-            # TODO: Create the decent page.
             # Append new card.
             with self.tabs:
                 page = ui.tab(f'{ic.path} | {ic.uid} | {ic.address}')
 
+            # Append the panel to the page.
             with ui.tab_panels(self.tabs, value=page).classes('w-full'):
-                with ui.tab_panel(page):
-                    info_card = ui.card()
-                    quality_card = ui.card()
+                tab_panel = ui.tab_panel(page)
+                with tab_panel:
+                    with ui.row():
+                        info_card = ui.card()
+                        quality_card = ui.card()
                     message_log = ui.log(max_lines=10)
+                    with ui.row():
+                        # The bags should be aligned with the mm's bags
+                        bags = {
+                            k: ui.textarea(label=k).style('width: 600px')
+                            for k in mm.bags.keys()}
 
             with info_card:
+                path_label = ui.label(f'Path: {ic.path} ({ic.uid})')
                 with ui.list().props('dense separator'):
                     ui.item(f"Client: {ic.path} ({ic.uid})")
                     ui.item(f"Address: {ic.address}")
@@ -441,34 +523,37 @@ class NiceGuiManager(object):
                             f"Delay: {ic.netDelay:.4f} | Offset: {ic.netRemoteTime - ic.netLocalTime:.4f}")
                         status_label = ui.label(f'Status: {ic.status}')
 
-            self.pages[ic.address].update(
+            self.pages_container[ic.address].update(
+                # Container, panel -> page.
                 page=page,
-                spinner=spinner,
+                tab_panel=tab_panel,
+                # Info label.
+                path_label=path_label,
                 status_label=status_label,
                 quality_label=quality_label,
-                message_log=message_log)
+                spinner=spinner,
+                # Message log area.
+                message_log=message_log,
+                # Bag textarea.
+                bags=bags
+            )
 
             # Register the log rolling thread, if the thread is not started.
-            if thread_name not in self.thread_book:
-                self.thread_book[thread_name] = 'started'
+            if ic.address not in self.thread_book:
+                self.thread_book[ic.address] = 'started'
                 Thread(target=self.log_rolling_thread,
-                       args=(message_log, ic.queue, thread_name), daemon=True).start()
+                       args=(message_log, ic.message_queue, ic.address), daemon=True).start()
 
         ui.update()
         return
 
 
 # %%
+ngm = NiceGuiManager()
+Thread(target=ngm.cc.run, daemon=True).start()
 
-if __name__ in ("__main__", "__mp_main__"):
-    print(f'Running in {__name__} mode.')
-
-    ngm = NiceGuiManager()
-    if __name__ == "__mp_main__":
-        Thread(target=ngm.cc.run, daemon=True).start()
-
-    ui.timer(1, ngm.timer_callback)
-    ui.run(title='BCI station')
+ui.timer(1, ngm.timer_callback)
+ui.run(title='BCI station', reload=False)
 
 # Client developer instructions:
 # To send a message, first send the advanced key code as an 8-byte value.

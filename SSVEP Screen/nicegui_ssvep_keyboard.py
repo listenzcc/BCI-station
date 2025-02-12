@@ -153,7 +153,7 @@ append_cue_button.on('click', append_cue_button_on_click)
 
 ui.timer(interval=1.0, callback=dc.update_status)
 
-ui.run(port=CONFIG.NiceGUI.port)
+ui.run(port=CONFIG.NiceGUI.port, reload=False)
 
 
 # %% ---- 2025-02-10 ------------------------

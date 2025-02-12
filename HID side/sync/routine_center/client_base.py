@@ -1,12 +1,155 @@
 import time
+import json
 import socket
+import random
 import contextlib
-import tkinter as tk
-from tkinter import ttk  # Import ttk from tkinter
 from threading import Thread, RLock
 
 
-class MailMan(object):
+class MyBag(dict):
+    _rlock = RLock()
+
+    def __init__(self):
+        super().__init__()
+
+    @contextlib.contextmanager
+    def freeze_bag(self):
+        '''Lock the bag for operations.'''
+        self._rlock.acquire()
+        try:
+            yield
+        finally:
+            self._rlock.release()
+
+    def dumps(self):
+        try:
+            json.dumps(self)
+        except Exception as e:
+            print(self)
+
+        with self.freeze_bag():
+            return json.dumps(self)
+
+    def insert_letter(self, letter):
+        '''
+        Insert a letter into the bag.
+        Automatically generate the list for repeated uid.
+
+        :param letter: The letter to insert.
+        '''
+        # Make sure the letter is unchanged.
+        letter = letter.copy()
+        with self.freeze_bag():
+            uid = letter.get('uid')
+            # Already have the letter of uid.
+            if uid in self:
+                # Already the list, append.
+                if isinstance(self[uid], list):
+                    self[uid].append(letter)
+                # Not the list, create the list and append the two.
+                if isinstance(self[uid], dict):
+                    self[uid] = [self[uid], letter]
+            # Not have the letter uid.
+            else:
+                self.update({uid: letter})
+
+    def fetch_letter(self, uid):
+        '''
+        Fetch a letter from the bag by its uid.
+
+        :param uid: The uid of the letter to fetch.
+
+        :return: The letter if exists, otherwise None.
+        '''
+        with self.freeze_bag():
+            if uid in self:
+                letter = self.pop(uid)
+                return letter
+
+
+class MailMan:
+    '''
+    The mail man for the communication letters.
+    '''
+    # Initialize bags.
+    # Good letters.
+    bag_finished = MyBag()
+    # Pending letters.
+    bag_pending = MyBag()
+    # Bad letters.
+    bag_failed = MyBag()
+    # Normal log.
+    bag_history = MyBag()
+
+    bags = {
+        'Bag-Finished': bag_finished,
+        'Bag-Pending': bag_pending,
+        'Bag-Failed': bag_failed,
+        'Bag-History': bag_history
+    }
+
+    # Initialize mailman with the session name.
+    # The name is unique.
+    session_name = f'{time.time()}-{random.random()}'
+
+    # Initialize letter index as 0, it naturally grows to idx every letters.
+    letter_idx = 0
+
+    def __init__(self, session_name: str = None):
+        if session_name is None:
+            self.session_name = f'{time.time()}-{random.random()}'
+        else:
+            self.session_name = session_name
+
+    def mk_letter(self, src: str, dst: str, content: str, timestamp: float = None):
+        '''
+        Make the letter with the given content.
+
+        :param src: Source of the letter.
+        :param dst: Destination of the letter.
+        :param content: Content of the letter.
+        :param timestamp: Timestamp of the letter.
+        '''
+        if not timestamp:
+            timestamp = time.time()
+
+        # Make the uid for the letter
+        uid = f'{self.session_name}-{self.letter_idx}'
+        self.letter_idx += 1
+        # The letter body
+        letter = dict(
+            # -- Required --
+            # Content.
+            content=content,
+            # Routine info.
+            src=src,
+            dst=dst,
+            # -- Automatic --
+            uid=uid,
+            # Prefix with _ refers the value is changed dynamically.
+            # Appended at every node.
+            _stations=[('origin', time.time())],
+            # Translate into local times by the control center.
+            _timestamp=timestamp)
+        self.bag_history.insert_letter(letter)
+        return letter
+
+    def pass_letter(self, letter: dict, path_uid: str):
+        '''
+        Pass the letter.
+        The path_uid is recorded in the _stations array in the letter.
+
+        :param letter: The letter to be passed.
+        :param path_uid: The path is passed with.
+
+        :return: The letter after passed.
+        '''
+        t = time.time()
+        letter['_stations'].append((path_uid, t))
+        return letter
+
+
+class MailMan_Deprecated(object):
     # Initialize some bags.
     bag_await_response = {}
     bag_finished = {}
@@ -49,7 +192,6 @@ class MailMan(object):
                 self.ui_update_needed = True
                 return letter
 
-
     def retrieve_letter_in_waiting(self, uid):
         '''
         Checkout the letter with the $uid.
@@ -86,7 +228,7 @@ class MailMan(object):
         with self.lock_bag():
             self.bag_finished[letter['uid']] = letter
             self.ui_update_needed = True
-    
+
     def mark_expired_letter_with_uid(self, uid):
         '''
         Mark the letter of $uid as the expired letter.
@@ -103,7 +245,7 @@ class MailMan(object):
         else:
             return None
 
-    def mk_letter(self, src: str, dst: str, content: str, timestamp: float=None):
+    def mk_letter(self, src: str, dst: str, content: str, timestamp: float = None):
         if not timestamp:
             timestamp = time.time()
 
@@ -127,85 +269,16 @@ class MailMan(object):
             _timestamp=timestamp)
         return letter
 
-    def recv_letter(self, letter:dict, path_uid:str):
+    def recv_letter(self, letter: dict, path_uid: str):
         t = time.time()
         letter['_stations'].append((path_uid, t))
         return letter
 
-    def init_ui(self):
-        '''Initialize the Tkinter UI.'''
-        self.root = tk.Tk()
-        self.root.geometry('600x400')  # Update width to 600 pixels
-        self.root.title(f"MailMan Explorer - {self.session_name}")
-
-        self.tabs = ttk.Notebook(self.root)
-        self.tabs.pack(expand=1, fill="both")
-
-        self.await_response_frame = tk.Frame(self.tabs)
-        self.finished_frame = tk.Frame(self.tabs)
-        self.expired_frame = tk.Frame(self.tabs)
-        self.pending_frame = tk.Frame(self.tabs)
-
-        self.tabs.add(self.await_response_frame, text="Await Response")
-        self.tabs.add(self.finished_frame, text="Finished")
-        self.tabs.add(self.expired_frame, text="Expired")
-        self.tabs.add(self.pending_frame, text="Pending")
-
-        self.await_response_listbox = tk.Listbox(self.await_response_frame)
-        self.finished_listbox = tk.Listbox(self.finished_frame)
-        self.expired_listbox = tk.Listbox(self.expired_frame)
-        self.pending_listbox = tk.Listbox(self.pending_frame)
-
-        self.await_response_scrollbar = tk.Scrollbar(self.await_response_frame, orient="vertical", command=self.await_response_listbox.yview)
-        self.finished_scrollbar = tk.Scrollbar(self.finished_frame, orient="vertical", command=self.finished_listbox.yview)
-        self.expired_scrollbar = tk.Scrollbar(self.expired_frame, orient="vertical", command=self.expired_listbox.yview)
-        self.pending_scrollbar = tk.Scrollbar(self.pending_frame, orient="vertical", command=self.pending_listbox.yview)
-
-        self.await_response_listbox.config(yscrollcommand=self.await_response_scrollbar.set)
-        self.finished_listbox.config(yscrollcommand=self.finished_scrollbar.set)
-        self.expired_listbox.config(yscrollcommand=self.expired_scrollbar.set)
-        self.pending_listbox.config(yscrollcommand=self.pending_scrollbar.set)
-
-        self.await_response_listbox.pack(side="left", expand=1, fill="both")
-        self.await_response_scrollbar.pack(side="right", fill="y")
-        self.finished_listbox.pack(side="left", expand=1, fill="both")
-        self.finished_scrollbar.pack(side="right", fill="y")
-        self.expired_listbox.pack(side="left", expand=1, fill="both")
-        self.expired_scrollbar.pack(side="right", fill="y")
-        self.pending_listbox.pack(side="left", expand=1, fill="both")
-        self.pending_scrollbar.pack(side="right", fill="y")
-
-        self.update_ui()
-        self.schedule_ui_update()
-        Thread(target=self.root.mainloop, daemon=True).start()
-
-    def schedule_ui_update(self):
-        '''Schedule periodic UI updates.'''
-        self.update_ui()
-        self.root.after(1000, self.schedule_ui_update)  # Update every second
-
-    def update_ui(self):
-        '''Update the UI with the current state of the bags.'''
-        if self.ui_update_needed:
-            self.await_response_listbox.delete(0, tk.END)
-            self.finished_listbox.delete(0, tk.END)
-            self.expired_listbox.delete(0, tk.END)
-            self.pending_listbox.delete(0, tk.END)
-
-            with self.lock_bag():
-                for uid, letter in self.bag_await_response.items():
-                    self.await_response_listbox.insert(tk.END, f"{uid}: {letter}")
-                for uid, letter in self.bag_finished.items():
-                    self.finished_listbox.insert(tk.END, f"{uid}: {letter}")
-                for uid, letter in self.bag_expired.items():
-                    self.expired_listbox.insert(tk.END, f"{uid}: {letter}")
-                for uid, letter in self.bag_pending.items():
-                    self.pending_listbox.insert(tk.END, f"{uid}: {letter}")
-
-            self.ui_update_needed = False
-
 
 class BaseClientSocket:
+    '''
+    Base client connecting with the routing center.
+    '''
     # Client setup, may be overridden by subclasses.
     path = '/client/baseClient'
     uid = 'bc-0'
@@ -214,7 +287,8 @@ class BaseClientSocket:
     # Use urlparse it derives:
     # ParseResult(scheme='', netloc='', path=path, params='', query=uid, fragment='')
     # See __init__ for detail.
-    path_uid = None
+    path_uid = f'{path}?{uid}'
+    mm = MailMan(f'{path}?{uid}?{time.time()}')
 
     # Socket setup, may be overridden by subclass and __init__ method.
     host = 'localhost'
@@ -237,7 +311,7 @@ class BaseClientSocket:
         self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.client_socket.settimeout(self.timeout)
 
-    def keep_alive(self, interval:float=5):
+    def keep_alive(self, interval: float = 5):
         '''
         Send keep-alive request every [interval] seconds.
 
@@ -263,8 +337,11 @@ class BaseClientSocket:
                     # The message output refers the message is processed well.
                     message = self.receive_message()
                 except (ConnectionAbortedError, ConnectionResetError, socket.timeout) as err:
-                    print(f'Known error occurred: {err}.')
+                    print(f'Connection is broken : {err}')
                     break
+                except Exception as err:
+                    print(f'Got exception: {err}')
+                    raise err
         Thread(target=_receive_message, daemon=True).start()
 
     def send_initial_info(self):
@@ -291,7 +368,8 @@ class BaseClientSocket:
                 self.key_code + message_length + message_bytes)
         else:
             self.client_socket.sendall(message_length + message_bytes)
-        print(f"Sent message: {message}")
+        # print(f"Sent message: {message}")
+        return message
 
     def connect(self):
         '''Connect to the self.host:self.port.'''
@@ -328,12 +406,10 @@ class BaseClientSocket:
 
         # Decode the message into str format.
         message = message.decode()
-        print(f"Received message: {message}")
         self.handle_incoming_message(message)
         return message
 
-
-    def handle_incoming_message(self, message:str):
+    def handle_incoming_message(self, message: str):
         '''
         Handle the receiving [message].
         '''
@@ -345,11 +421,20 @@ class BaseClientSocket:
             t2 = time.time()
             response_message = f"Echo,{t1},{t2}"
             self.send_message(response_message)
+
+        # Handle acquire bag messages.
+        elif message.startswith('AcquireBags'):
+            for name, bag in self.mm.bags.items():
+                if name in message:
+                    print(f'Acquired bag: {name}')
+                    self.send_message(name + ':' + bag.dumps())
+
+        # Handle other messages.
         else:
             self.handle_message(message)
-            pass
+        return
 
-    def handle_message(self, message:str):
+    def handle_message(self, message: str):
         '''
         Handle the receiving [message].
         ! The method should be overridden for customized usage.
@@ -357,7 +442,8 @@ class BaseClientSocket:
         Args:
             message (str): Message to be handled.
         '''
-        print(f"!!! Got message: {message}")
+        # print(f"!!! Got message: {message}")
+        return
 
 
 if __name__ == "__main__":

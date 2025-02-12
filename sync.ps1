@@ -5,7 +5,7 @@
 $sourcePath = "Routine Center\client_base.py"
 
 # Define the list of target folders
-$folders = @("EEG device side", "HID side", "Simulation workload")
+$folders = @("EEG device side", "HID side", "Simulation workload", "SSVEP Screen")
 
 # Loop through each folder in the list
 foreach ($folder in $folders) {
