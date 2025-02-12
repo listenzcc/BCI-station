@@ -179,8 +179,8 @@ class AudioStream:
                 return np.frombuffer(self.stream.read(self.SAMPLESIZE), dtype=np.int16)
             except Exception as e:
                 print(f"Audio read error: {e}")
-                return np.zeros(self.SAMPLESIZE)
-        return np.zeros(self.SAMPLESIZE)
+                return
+        return
 
     def close(self):
         if self.audio_available:
@@ -288,11 +288,11 @@ if __name__ == "__main__":
 
         # Update audio plot
         y = audio_stream.read_audio()
-        line.set_data(x, y)
+        if y is not None:
+            line.set_data(x, y)
 
         # Update camera feed
-        frame = camera_stream.read_frame()
-        if frame is not None:
+        if frame := camera_stream.read_frame():
             ax4.clear()
             ax4.imshow(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
             ax4.axis('off')  # Hide axes for the camera feed
