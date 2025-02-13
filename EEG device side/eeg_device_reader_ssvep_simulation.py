@@ -203,7 +203,7 @@ def convert_data_into_array(input_data: list, package_interval: float, time_reso
     corrected_last_time = (y1 + d)[-1]
 
     # Concatenate the data and assign the time points.
-    data = np.array(np.concat([e[2].T for e in input_data], axis=0))
+    data = np.array(np.concatenate([e[2].T for e in input_data], axis=0))
     m = len(data)
     times = np.array([corrected_last_time-j*time_resolution for j in range(m)])
 

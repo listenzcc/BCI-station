@@ -104,6 +104,13 @@ class IncomingClient:
 
 
 class ControlCenter:
+    '''
+    The control center for incoming clients.
+    When the client comes, its connection quality is measured immediately at connecting.
+    During the measurement, the time lag and offset is measured.
+    In the end, 'YouAreGoodToGo' message is sent.
+    It means the connection is fully ready.
+    '''
     host = 'localhost'
     port = 12345
     valid_key = b'12345678'
@@ -197,6 +204,7 @@ class ControlCenter:
 
         # Now I have the legal IncomingClient.
         try:
+            self.send_message(ic.socket, 'YouAreGoodToGo')
             self._handle_client_message_loop(ic)
         except (ConnectionResetError, ConnectionAbortedError, AssertionError) as err:
             logger.error(f'Occurred: {err}')
@@ -422,7 +430,9 @@ control_center = ControlCenter()
 
 class NiceGuiManager(object):
     pages_container: dict = defaultdict(dict)
+    # Initialize the tabs, tab_panels, where the tab_panels contains the tabs object.
     tabs = ui.tabs().classes('w-full')
+    tab_panels = ui.tab_panels(tabs).classes('w-full')
     cc = control_center
     thread_book = {}
 
@@ -496,7 +506,10 @@ class NiceGuiManager(object):
                 page = ui.tab(f'{ic.path} | {ic.uid} | {ic.address}')
 
             # Append the panel to the page.
-            with ui.tab_panels(self.tabs, value=page).classes('w-full'):
+            # Set the current tab with the latest added page.
+            self.tab_panels.set_value(page)
+            # Work with the current page.
+            with self.tab_panels:
                 tab_panel = ui.tab_panel(page)
                 with tab_panel:
                     with ui.row():

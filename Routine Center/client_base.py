@@ -3,6 +3,8 @@ import json
 import socket
 import random
 import contextlib
+
+from queue import Queue
 from threading import Thread, RLock
 
 
@@ -272,7 +274,9 @@ class MailMan_Deprecated(object):
 
 class BaseClientSocket:
     '''
-    Base client connecting with the routing center.
+    Base client talks to the routing center.
+    During the connecting, the connection quality is measured.
+    It blocks the connection process until it receives 'YouAreGoodToGo' message.
     '''
     # Client setup, may be overridden by subclasses.
     path = '/client/baseClient'
@@ -289,6 +293,9 @@ class BaseClientSocket:
     host = 'localhost'
     port = 12345
     timeout = 1000
+
+    # Good to go stuff
+    good_to_go_queue = Queue(10)
 
     def __init__(self, host=None, port=None, timeout=None):
         if host:
@@ -369,11 +376,13 @@ class BaseClientSocket:
     def connect(self):
         '''Connect to the self.host:self.port.'''
         self.client_socket.connect((self.host, self.port))
-        print(f"Connected to server at {self.host}:{self.port}")
+        print(f"Connecting to server at {self.host}:{self.port}")
         self.send_initial_info()
         self.keep_receiving()
         self.keep_alive()
-        time.sleep(1)
+        # Block until the connection is fully set.
+        _ = self.good_to_go_queue.get()
+        print(f"Connected to server at {self.host}:{self.port}")
 
     def close(self):
         '''Close the socket.'''
@@ -424,6 +433,11 @@ class BaseClientSocket:
                 if name in message:
                     # print(f'Acquired bag: {name}')
                     self.send_message(name + ':' + bag.dumps())
+
+        # Handle good to go message.
+        # Release the blocking status.
+        elif message.startswith('YouAreGoodToGo'):
+            self.good_to_go_queue.put_nowait(message)
 
         # Handle other messages.
         else:
