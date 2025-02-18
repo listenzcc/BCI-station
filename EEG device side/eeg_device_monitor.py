@@ -292,7 +292,8 @@ if __name__ == "__main__":
             line.set_data(x, y)
 
         # Update camera feed
-        if frame := camera_stream.read_frame():
+        frame = camera_stream.read_frame()
+        if frame is not None:
             ax4.clear()
             ax4.imshow(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
             ax4.axis('off')  # Hide axes for the camera feed

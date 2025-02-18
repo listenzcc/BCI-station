@@ -78,10 +78,17 @@ large_font = ImageFont.truetype("c:\\windows\\fonts\\simhei.ttf", 64)
 # Function and class
 
 
-class SSVEPInputState(Enum):
-    freedomInput = '自由输入'
-    cuedInput = '指定输入'
-    outputSelection = '输出选择'
+# class SSVEPInputState(Enum):
+#     freedomInput = '自由输入'
+#     cuedInput = '指定输入'
+#     outputSelection = '输出选择'
+
+class SSVEPTrialStage(Enum):
+    unavailable = -1  # SSVEP trial 无效
+    prompting = 1  # 提示阶段
+    blinking = 2  # 闪烁阶段
+    blinking2 = 3  # 闪烁阶段（展示解码结果）
+    deciding = 4  # 决策阶段
 
 
 class MyClient(BaseClientSocket):
@@ -301,6 +308,7 @@ class SSVEPScreenPainter(AdditionalFunctions, SSVEPFrequency):
     num_columns: int = 6
     current_layout: list = []
     current_cue: tuple = None
+    current_trial_stage: Enum = SSVEPTrialStage.unavailable
 
     def __init__(self):
         super().__init__()
@@ -409,13 +417,19 @@ class SSVEPScreenPainter(AdditionalFunctions, SSVEPFrequency):
         ssvep_screen_layout.reset_box(
             0, self.header_height, self.width, self.height)
 
-        # The flipping rate is slower when the speed_factor is lower.
-        speed_factor = 1
-        # speed_factor = 0.5
-        change_char_step = 7  # seconds
-        change_char_next_passed = change_char_step
-
         def setup_trial():
+            '''
+            Prepare the layout of the SSVEP trial.
+
+            The self.current_layout and self.current_cue are produced by the outputs, where
+
+            self.current_layout = layout
+            self.current_cue = (cue, cue_idx)
+
+            :returns layout (list): The layout of the SSVEP trial.
+            :returns cue: The cue str of the SSVEP trial, None if cue is not available.
+            :returns cue_idx: The index of the cue patch in the layout, None if cue is not available.
+            '''
             # Acquire the layout.
             ssvep_screen_layout.reset_columns(self.num_columns)
             layout = ssvep_screen_layout.get_layout()
@@ -438,14 +452,23 @@ class SSVEPScreenPainter(AdditionalFunctions, SSVEPFrequency):
                     '__decoded_omega': None
                 })
 
+            # Produce the self.current_layout and self.current_cue.
             self.current_layout = layout
             self.current_cue = (cue, cue_idx)
 
+            return layout, cue, cue_idx
+
+        def start_ssvep_blinking():
+            '''
+            Build the content and send.
+            '''
             content = {
                 'action': 'SSVEP trial starts.',
                 'cue': None,
                 'cueOmega': None
             }
+            layout = self.current_layout
+            cue, cue_idx = self.current_cue
             if cue_idx:
                 cue_patch = layout[cue_idx]
                 content.update({
@@ -455,30 +478,39 @@ class SSVEPScreenPainter(AdditionalFunctions, SSVEPFrequency):
             content = json.dumps(content)
             letter = client.mm.mk_letter(
                 src=client.path_uid, dst='/eeg/monitor', content=content)
-            print(json.loads(content))
             client.send_message(json.dumps(letter))
             client.mm.bag_pending.insert_letter(letter)
             Thread(target=self.wait_for_decoding,
                    args=(letter,), daemon=True).start()
-
-            return layout, cue, cue_idx
+            return
 
         # Make the first trial
         layout, cue, cue_idx = setup_trial()
-
+        # Reset the image.
         self.reset_img()
+
+        # The flipping rate is slower when the speed_factor is lower.
+        speed_factor = 1
+        # Total length for the SSVEP trial.
+        ssvep_trial_duration = 7  # seconds
+        prompting_duration = 1  # seconds
+        this_trial_start_at_seconds = 0
+        next_trial_start_at_seconds = ssvep_trial_duration
+
+        self.current_trial_stage = SSVEPTrialStage.prompting
+
         while self.rt.running:
             # Update the timer to the next frame.
             self.rt.step()
 
             # Get the current time.
             passed = self.rt.get()
-
             # Modify the passed seconds with speed_factor.
-            z = passed * speed_factor
+            passed *= speed_factor
 
             # It is time to process the latest trial.
-            if z > change_char_next_passed:
+            if passed > next_trial_start_at_seconds:
+                self.current_trial_stage = SSVEPTrialStage.deciding
                 # If has cue
                 cue, cue_idx = self.current_cue
                 if cue:
@@ -491,17 +523,31 @@ class SSVEPScreenPainter(AdditionalFunctions, SSVEPFrequency):
 
                 # Get the layout of the next trial.
                 layout, cue, cue_idx = setup_trial()
-
                 # Reset the image.
                 self.reset_img()
 
                 # Reset the next judgement time.
-                change_char_next_passed += change_char_step
+                this_trial_start_at_seconds = passed
+                next_trial_start_at_seconds += ssvep_trial_duration
+                self.current_trial_stage = SSVEPTrialStage.prompting
 
-            # Compute trial ratio, always in (0, 1)
-            tr = 1-(change_char_next_passed - z) / change_char_step
-            seconds_in_trial = tr * change_char_step
+            # How many seconds are passed in the trial.
+            seconds_in_trial = passed - this_trial_start_at_seconds
+            # How many seconds are passed in the trial AFTER the prompting.
+            seconds_in_trial_after_prompting = seconds_in_trial - prompting_duration
+            # Compute trial ratio, always in (0, 1).
+            # The 0 refers trial starts, and the 1 refers trial ends.
+            tr = seconds_in_trial / ssvep_trial_duration
+            # Whether it is inside the prompting stage.
+            prompting_flag = seconds_in_trial_after_prompting < 0
 
+            # If the prompting_flag is not True, and still inside prompting stage,
+            # it means that the stage is converting into blinking stage.
+            if not prompting_flag and self.current_trial_stage is SSVEPTrialStage.prompting:
+                start_ssvep_blinking()
+                self.current_trial_stage = SSVEPTrialStage.blinking
+
+            # Draw on the screen.
             with self.rlock:
                 # Clear only the text area before drawing new text.
                 self.img_drawer.rectangle(
@@ -509,7 +555,7 @@ class SSVEPScreenPainter(AdditionalFunctions, SSVEPFrequency):
 
                 # Draw the time issue.
                 self.img_drawer.text(
-                    (self.width, 0), f'{z:.2f} | {seconds_in_trial:.2f}',
+                    (self.width, 0), f'{passed:.2f} | {seconds_in_trial:.2f}',
                     font=small_font, anchor='rt')
 
                 # Draw the current input.
@@ -537,13 +583,24 @@ class SSVEPScreenPainter(AdditionalFunctions, SSVEPFrequency):
 
                     # Draw the patch.
                     # Compute omega and phase.
-                    c = 0.5 + 0.5 * \
-                        np.cos(seconds_in_trial*omega*2*np.pi + phase)
-                    c = int(c*255)
+                    # Prompting stage
+                    if self.current_trial_stage is SSVEPTrialStage.prompting:
+                        c = 10
+
+                    # Blinking stage 1
+                    if self.current_trial_stage is SSVEPTrialStage.blinking:
+                        c = 0.5 + 0.5 * \
+                            np.cos(seconds_in_trial_after_prompting *
+                                   omega*2*np.pi + phase)
+                        c = int(c*255)
+
+                    # Blinking stage 2
+                    if self.current_trial_stage is SSVEPTrialStage.blinking2:
+                        c = 10
 
                     # Draw the patch.
-                    self.img_drawer.rectangle((x, y, x+sz, y+sz),
-                                              fill=(c, c, c, c))
+                    self.img_drawer.rectangle(
+                        (x, y, x+sz, y+sz), fill=(c, c, c, c))
                     # Draw the idx.
                     self.img_drawer.text((x, y), f'{idx}', font=small_font)
 
@@ -560,6 +617,7 @@ class SSVEPScreenPainter(AdditionalFunctions, SSVEPFrequency):
 
                     # Draw the decoded frame.
                     if omega == decoded_omega:
+                        self.current_trial_stage = SSVEPTrialStage.blinking2
                         self.img_drawer.rectangle(
                             (x-1, y-1, x+sz+1, y+sz+1), outline='green', width=7)
 
