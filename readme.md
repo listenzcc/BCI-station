@@ -6,7 +6,7 @@
 
 It is the message center.
 
-- Firstly, it receives the letters and delivers them as the "dst" field. The letter's format is formatted as the `MailMan.mk_letter()` in the [client_base.py](./Routine%20Center/client_base.py)
+- Firstly, it receives the letters and delivers them as the "dst" field. The letter's format is formatted as the `MailMan.mk_letter()` in the [client_base.py](./Routine%20Center/client_base.py). And the `ClientBase` provides the smallest module connecting to the Routine Center.
 - Secondly, it automatically convert the "timestamp" field into the dst's time zone.
 - Thirdly, it starts the NiceGUI application to review the connected clients.
 
